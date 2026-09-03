@@ -29,10 +29,13 @@ class GameWindowCapturor:
         self.capture_control = None
         self.window_title = ""
 
-        # If use test image as input, disable the whole capture thread
+        # Keep direct construction with a test image backward-compatible.
         if test_image_name is not None:
             self.frame = load_image(f"test/{test_image_name}.png")
-            raise FileNotFoundError(f"[GameWindowCapturor] Test image not found: {test_image_name}")
+            logger.info(
+                f"[GameWindowCapturor] Loaded test image: {test_image_name}"
+            )
+            return
 
         # Get game window title
         self.window_title = get_game_window_title_by_token(cfg["game_window"]["title"])
@@ -76,6 +79,8 @@ class GameWindowCapturor:
         with self.lock:
             if self.frame is None:
                 return None
+            if self.frame.shape[2] == 3:
+                return self.frame.copy()
             return cv2.cvtColor(self.frame, cv2.COLOR_BGRA2BGR)
 
     def stop(self):

@@ -10,7 +10,10 @@ from PySide6.QtWidgets import (
     QGroupBox, QCheckBox, QFormLayout, QLineEdit
 )
 from PySide6.QtCore import Qt, QObject, Signal
-from PySide6.QtGui import QKeySequence, QKeyEvent, QDoubleValidator, QIntValidator
+from PySide6.QtGui import (
+    QImage, QIntValidator, QKeyEvent, QKeySequence, QPixmap,
+    QDoubleValidator,
+)
 
 # Local import
 from src.utils.logger import logger
@@ -62,6 +65,21 @@ def clear_debug_canvas(canvas, message="Press start or 'F1' to start AutoBot"):
     canvas.clear()
     canvas.setText(message)
     canvas.setAlignment(Qt.AlignCenter)
+
+
+def update_image_canvas(canvas, img):
+    """Scale a BGR OpenCV image onto a QLabel while preserving its ratio."""
+    height, width, _ = img.shape
+    qimg = QImage(img.data, width, height, QImage.Format_BGR888)
+    pixmap = QPixmap.fromImage(qimg)
+    canvas.setPixmap(
+        pixmap.scaled(
+            canvas.width(),
+            canvas.height(),
+            Qt.KeepAspectRatio,
+            Qt.SmoothTransformation,
+        )
+    )
 
 class SingleKeyEdit(QKeySequenceEdit):
     def keyPressEvent(self, event: QKeyEvent):

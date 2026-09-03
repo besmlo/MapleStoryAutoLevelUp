@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit, QTabWidget, QGroupBox, QFormLayout,
     QSizePolicy, QComboBox, QListWidgetItem, QScrollArea, QSplitter
 )
-from PySide6.QtGui import QTextCharFormat, QColor, QTextCursor, QPixmap, QImage, QIcon
+from PySide6.QtGui import QTextCharFormat, QColor, QTextCursor, QIcon
 from PySide6.QtCore import Qt, Signal
 
 # Local import
@@ -23,10 +23,12 @@ from src.utils.logger import logger
 from src.utils.ui import (
     validate_numerical_input, clear_debug_canvas,
     create_error_label, SingleKeyEdit, QtLogHandler, create_advance_setting_gbox,
+    update_image_canvas,
 )
 from src.utils.common import (
     load_yaml, override_cfg, is_mac, save_yaml, get_cfg_diff, load_yaml_with_comments
 )
+from src.ui.MapCreationWidget import MapCreationWidget
 
 # window size for each tab
 if is_mac():
@@ -34,12 +36,14 @@ if is_mac():
         'Main': (700, 800),
         'Advanced Settings': (750, 800),
         'Monitoring': (1000, 650), # smaller for macbook screen
+        'Map Creator': (1100, 750),
     }
 else:
     TAB_WINDOW_SIZE = {
         'Main': (700, 800),
         'Advanced Settings': (750, 800),
         'Monitoring': (1280, 700),
+        'Map Creator': (1280, 760),
     }
 
 ADV_SETTINGS_HIDE = ['key', 'bot'] # cfg tile here will not shown in advanced settings tabs
@@ -84,11 +88,13 @@ class MainWindow(QMainWindow):
         self.tab_main = self.setup_main_tab()
         self.tab_advance_setting = self.setup_advance_setting_tab()
         self.tab_monitoring = self.setup_monitoring_tab()
+        self.tab_map_creator = self.setup_map_creator_tab()
 
         # Add tabs to tab widget
         self.tabs.addTab(self.tab_main, "Main")
         self.tabs.addTab(self.tab_advance_setting, "Advanced Settings")
         self.tabs.addTab(self.tab_monitoring, "Monitoring")
+        self.tabs.addTab(self.tab_map_creator, "Map Creator")
 
         # Change tabs signals
         self.tabs.currentChanged.connect(self.on_tab_changed)
@@ -217,6 +223,15 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(1, 2)
         layout.addWidget(splitter)
         return tab
+
+    def setup_map_creator_tab(self):
+        widget = MapCreationWidget(
+            self.controller.route_recorder_controller,
+            lambda: self.cfg,
+            self.data["eng_to_cn"],
+        )
+        widget.map_created.connect(self.on_map_created)
+        return widget
 
     def save_ui_state(self):
         path = os.path.join(os.path.expanduser("~"), ".maplebot_ui_state.json")
@@ -429,9 +444,19 @@ class MainWindow(QMainWindow):
         '''
         gbox = QGroupBox("🗺️ Map")
 
-        # Load map list from directory
         self.list_widget_maps = QListWidget()
         self.list_widget_maps.itemClicked.connect(self.on_map_selected)
+        self.refresh_map_list()
+
+        layout = QVBoxLayout()
+        self.label_map_info = QLabel("Please select a map:")
+        layout.addWidget(self.label_map_info)
+        layout.addWidget(self.list_widget_maps)
+        gbox.setLayout(layout)
+        return gbox
+
+    def refresh_map_list(self, selected_map=None):
+        self.list_widget_maps.clear()
         minimap_dir = "minimaps"
         for name in os.listdir(minimap_dir):
             if name.startswith("."):
@@ -446,13 +471,16 @@ class MainWindow(QMainWindow):
                     item = QListWidgetItem(display_text)
                     item.setData(Qt.UserRole, name)
                     self.list_widget_maps.addItem(item)
+                    if name == selected_map:
+                        self.list_widget_maps.setCurrentItem(item)
 
-        layout = QVBoxLayout()
-        self.label_map_info = QLabel("Please select a map:")
-        layout.addWidget(self.label_map_info)
-        layout.addWidget(self.list_widget_maps)
-        gbox.setLayout(layout)
-        return gbox
+    def on_map_created(self, map_id):
+        self.data = load_yaml("config/config_data.yaml")
+        self.refresh_map_list(map_id)
+        self.selected_map = map_id
+        self.label_map_info.setText(
+            f"Selected map: {os.path.join('minimaps', map_id)}"
+        )
 
     def create_log_gbox(self):
         gbox = QGroupBox("📜 Log")
@@ -766,6 +794,10 @@ class MainWindow(QMainWindow):
             self.update_cfg_from_main_ui()
             self.apply_config_to_ui()
 
+        elif tab_name == "Map Creator":
+            self.controller.disable_bot_viz()
+            self.update_cfg_from_main_ui()
+
         else:
             logger.error(f"[UI] Unexpected tab name: {tab_name}")
             self.controller.disable_bot_viz()
@@ -864,6 +896,27 @@ class MainWindow(QMainWindow):
     def toggle_screenshot_ui(self):
         self.controller.take_screenshot()
 
+    def handle_f1(self):
+        if self.tabs.currentWidget() is self.tab_map_creator:
+            if self.tab_map_creator.record_button.isEnabled():
+                self.tab_map_creator.record_button.click()
+        else:
+            self.button_start_pause.click()
+
+    def handle_f2(self):
+        if self.tabs.currentWidget() is self.tab_map_creator:
+            if self.tab_map_creator.save_map_button.isEnabled():
+                self.tab_map_creator.save_map_button.click()
+        else:
+            self.button_screenshot.click()
+
+    def handle_f3(self):
+        if self.tabs.currentWidget() is self.tab_map_creator:
+            if self.tab_map_creator.finish_route_button.isEnabled():
+                self.tab_map_creator.finish_route_button.click()
+        else:
+            self.button_record.click()
+
     def toggle_record_ui(self):
         if self.button_record.isChecked():
             self.button_record.setText("⏹ Stop (F3)")
@@ -941,7 +994,7 @@ class MainWindow(QMainWindow):
                 self.debug_canvas, "Start AutoBot to view game detection"
             )
             return
-        self._update_image_canvas(self.debug_canvas, img)
+        update_image_canvas(self.debug_canvas, img)
 
     def update_route_map_canvas(self, img):
         if img is None:
@@ -950,20 +1003,7 @@ class MainWindow(QMainWindow):
                 "Route preview is available in normal mode",
             )
             return
-        self._update_image_canvas(self.route_map_canvas, img)
-
-    @staticmethod
-    def _update_image_canvas(canvas, img):
-        height, width, _ = img.shape
-        qimg = QImage(img.data, width, height, QImage.Format_BGR888)
-        pixmap = QPixmap.fromImage(qimg)
-        scaled_pixmap = pixmap.scaled(
-            canvas.width(),
-            canvas.height(),
-            Qt.KeepAspectRatio,
-            Qt.SmoothTransformation,
-        )
-        canvas.setPixmap(scaled_pixmap)
+        update_image_canvas(self.route_map_canvas, img)
 
     def update_advance_setting_ui_from_cfg(self):
         '''
@@ -1110,7 +1150,11 @@ class MainWindow(QMainWindow):
         event.accept()  # Continue with the close
 
 if __name__ == "__main__":
+    from src.ui.AutoBotController import AutoBotController
+
     app = QApplication(sys.argv)
-    window = MainWindow()
+    controller = AutoBotController()
+    window = MainWindow(controller)
+    controller.update_signal(window)
     window.show()
     sys.exit(app.exec())

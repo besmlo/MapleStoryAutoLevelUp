@@ -10,6 +10,7 @@ from src.engine.MapleStoryAutoLevelUp import MapleStoryAutoBot
 from src.utils.logger import logger
 from src.utils.common import load_yaml
 from src.input.KeyBoardListener import KeyBoardListener
+from src.ui.RouteRecorderController import RouteRecorderController
 
 class AutoBotController(QObject):
     '''
@@ -44,6 +45,13 @@ class AutoBotController(QObject):
         else:
             logger.info("MapleStoryAutoBot Init Successfully")
 
+        self.route_recorder_controller = RouteRecorderController(
+            can_start=lambda: not (
+                self.auto_bot.thread_auto_bot is not None
+                and self.auto_bot.thread_auto_bot.is_alive()
+            )
+        )
+
         # Update signal for debug window viz
         self.auto_bot.update_signals(self.debug_image_signal,
                                      self.route_map_viz_signal)
@@ -68,15 +76,19 @@ class AutoBotController(QObject):
         self.debug_image_signal.connect(ui.update_debug_canvas)
         self.route_map_viz_signal.connect(ui.update_route_map_canvas)
         # Register Function Key handler
-        self.kb_listener.register_func_key_handler('f1', ui.button_start_pause.click)
-        self.kb_listener.register_func_key_handler('f2', ui.button_screenshot.click)
-        self.kb_listener.register_func_key_handler('f3', ui.button_record.click)
+        self.kb_listener.register_func_key_handler('f1', ui.handle_f1)
+        self.kb_listener.register_func_key_handler('f2', ui.handle_f2)
+        self.kb_listener.register_func_key_handler('f3', ui.handle_f3)
         self.kb_listener.register_func_key_handler('f12', lambda: ui.request_close.emit())
 
     def start_bot(self, cfg_path):
         '''
         Start the bot engine threads
         '''
+        if self.route_recorder_controller.is_running:
+            logger.error("Stop map creation before starting AutoBot")
+            return -1
+
         # Get config from ui
         cfg = load_yaml(cfg_path)
 
@@ -88,6 +100,7 @@ class AutoBotController(QObject):
         try:
             self.auto_bot.start()
         except Exception as e:
+            self.auto_bot.terminate_threads()
             logger.error(f"[start_bot] {e}")
             return -1 # Start fail
 
@@ -123,6 +136,8 @@ class AutoBotController(QObject):
         '''
         # Terminate all bot threads
         self.auto_bot.terminate_threads()
+        self.route_recorder_controller.stop_session()
+        self.kb_listener.stop()
 
     def enable_bot_viz(self):
         '''

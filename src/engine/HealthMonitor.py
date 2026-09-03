@@ -66,9 +66,12 @@ class HealthMonitor:
         Stop health monitoring thread
         '''
         self.is_terminated = True
-        if self.thread:
-            self.thread.join()
-            logger.info("[Health Monitor] Terminated")
+        if self.thread and self.thread is not threading.current_thread():
+            self.thread.join(timeout=2.0)
+            if self.thread.is_alive():
+                logger.warning("[Health Monitor] Stop timed out")
+            else:
+                logger.info("[Health Monitor] Terminated")
 
     def enable(self):
         '''

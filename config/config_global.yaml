@@ -58,7 +58,7 @@ game_window:
 
 system:
   server: "NA" # North America server
-  language: "english"
+  language: "eng"
 
 # Sent Email to user to get pass lie detector
 email:

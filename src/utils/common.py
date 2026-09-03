@@ -160,6 +160,25 @@ def load_image(path, mode=cv2.IMREAD_COLOR):
 
     return img
 
+
+def normalize_language_code(language):
+    """Return the asset language suffix used by files under ``misc/``."""
+    aliases = {
+        "cn": "cn",
+        "chinese": "cn",
+        "zh": "cn",
+        "eng": "eng",
+        "en": "eng",
+        "english": "eng",
+    }
+    normalized = aliases.get(str(language).strip().lower())
+    if normalized is None:
+        supported = ", ".join(sorted(aliases))
+        raise ValueError(
+            f"Unsupported language '{language}'. Supported values: {supported}"
+        )
+    return normalized
+
 def nms(monsters, iou_threshold=0.3):
     '''
     Apply Non-Maximum Suppression (NMS) to remove overlapping detections.

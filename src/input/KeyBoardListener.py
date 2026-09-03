@@ -15,7 +15,7 @@ class KeyBoardListener():
     '''
     KeyBoardListener
     '''
-    def __init__(self, cfg=None, is_autobot=True):
+    def __init__(self, cfg=None, is_autobot=True, capture_function_keys=True):
         self.cfg = cfg
         self.t_last_run = time.time()
         self.is_enable = True
@@ -23,6 +23,7 @@ class KeyBoardListener():
         self.is_terminated = False
         self.fps = 0
         self.fps_limit = 30
+        self.capture_function_keys = capture_function_keys
         self.key_pressing = [] # record the key pressed by user
         self.is_pressed_func_key = [False]*12  # 'F1', 'F2', .... 'F12'
 
@@ -47,15 +48,20 @@ class KeyBoardListener():
 
         # Start keyboard control thread
         if is_autobot:
-            threading.Thread(target=self.run_for_autobot, daemon=True).start()
+            self.worker_thread = threading.Thread(
+                target=self.run_for_autobot, daemon=True
+            )
         else:
             self.cfg = cfg
             self.window_title = cfg["game_window"]["title"]
-            threading.Thread(target=self.run_for_route_recorder, daemon=True).start()
+            self.worker_thread = threading.Thread(
+                target=self.run_for_route_recorder, daemon=True
+            )
+        self.worker_thread.start()
 
-        listener = keyboard.Listener(on_press=self.on_press,
-                                     on_release=self.on_release)
-        listener.start()
+        self.listener = keyboard.Listener(on_press=self.on_press,
+                                          on_release=self.on_release)
+        self.listener.start()
 
     def do_nothing(self):
         pass
@@ -90,7 +96,7 @@ class KeyBoardListener():
             k = key.char.lower()
         except AttributeError:
             # Handle F1, F2, F3, ... F12
-            if key in self.func_keys:
+            if self.capture_function_keys and key in self.func_keys:
                 idx = self.func_keys[key]
                 if time.time() - self.t_func_key[idx] > self.debounce_interval:
                     self.is_pressed_func_key[idx] = True # Polling
@@ -126,6 +132,9 @@ class KeyBoardListener():
         Stop keyboard listener thread
         '''
         self.is_terminated = True
+        self.listener.stop()
+        if self.worker_thread is not threading.current_thread():
+            self.worker_thread.join(timeout=2.0)
 
     def is_game_window_active(self):
         '''

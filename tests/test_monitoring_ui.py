@@ -7,11 +7,13 @@ import numpy as np
 from PySide6.QtWidgets import QApplication
 
 from src.ui.ui import MainWindow
+from src.ui.RouteRecorderController import RouteRecorderController
 
 
 class ControllerStub:
     def __init__(self):
         self.visualization_enabled = False
+        self.route_recorder_controller = RouteRecorderController()
 
     def enable_bot_viz(self):
         self.visualization_enabled = True
@@ -39,7 +41,10 @@ class MonitoringUiTest(unittest.TestCase):
             for index in range(self.window.tabs.count())
         ]
 
-        self.assertEqual(tab_names, ["Main", "Advanced Settings", "Monitoring"])
+        self.assertEqual(
+            tab_names,
+            ["Main", "Advanced Settings", "Monitoring", "Map Creator"],
+        )
         self.assertIsNotNone(self.window.debug_canvas)
         self.assertIsNotNone(self.window.route_map_canvas)
 

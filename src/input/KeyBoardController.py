@@ -113,7 +113,8 @@ class KeyBoardController():
             raise ValueError(f"Unexpected attack type: {cfg['bot']['attack']}")
 
         # Start keyboard control thread
-        threading.Thread(target=self.run, daemon=True).start()
+        self.thread = threading.Thread(target=self.run, daemon=True)
+        self.thread.start()
 
         logger.info("[KeyBoardController] Init done")
 
@@ -138,6 +139,15 @@ class KeyBoardController():
         enable keyboard controlller
         '''
         self.is_enable = True
+
+    def stop(self, timeout=2.0):
+        """Stop the worker and release any keys held by the controller."""
+        self.is_terminated = True
+        self.release_all_key()
+        if self.thread is not threading.current_thread():
+            self.thread.join(timeout=timeout)
+            if self.thread.is_alive():
+                logger.warning("[KeyBoardController] Stop timed out")
 
     def set_command(self, new_command):
         '''

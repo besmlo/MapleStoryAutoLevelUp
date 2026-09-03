@@ -111,12 +111,22 @@ bot:
 ## Supported Map
 Please refer to config/config_data.yaml
 
-## Want to Make a New Map? → Route Recorder
+## Want to Make a New Map? → Map Creator
 
-To design a custom route more easily, you can use the `routeRecorder.py` script.
-It listens to your keyboard inputs and records them onto a route map.
+Start the normal UI and open the **Map Creator** tab. The guided workflow keeps
+the game preview, scanned minimap, and current route in one window:
 
-Use the following command in your terminal to start recording:
+1. Enter a new Map ID, optional display name, and select the monsters.
+2. Click **Start map scan**, then move around the map to reveal the minimap.
+3. Click **Start route recording** and walk the route in the game.
+4. Click **Finish current route** at the desired endpoint. Repeat to add routes.
+5. Click **Validate and finish**. The map is checked and registered in
+   `config/config_data.yaml` automatically.
+
+Map IDs accept letters, numbers, underscores, and hyphens. An existing map
+directory is never overwritten by the UI.
+
+The original command-line recorder remains available for advanced use:
 
 ```
 python -m tools.routeRecorder --new_map <map_directory_name>
@@ -128,7 +138,8 @@ python -m tools.routeRecorder --new_map <map_directory_name>
 | `F3` | Save current route map and start a new one |
 | `F4` | Save the current map to map.png            |
 
-* Remember to add mobs to map by registering it to config/config_data.yaml
+* Command-line users must still register the map and monsters in
+  `config/config_data.yaml` manually.
 
 ## Want to Make a New Monster? → Mob Maker
 

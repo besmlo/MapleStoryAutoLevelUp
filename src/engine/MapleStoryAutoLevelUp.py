@@ -24,10 +24,12 @@ from src.utils.common import (find_pattern_sqdiff, draw_rectangle, screenshot, n
     load_image, get_mask, get_minimap_loc_size, get_player_location_on_minimap,
     is_mac, nms_matches, override_cfg, load_yaml, get_all_other_player_locations_on_minimap,
     click_in_game_window, mask_route_colors, to_opencv_hsv, debug_minimap_colors,
+    normalize_language_code,
     activate_game_window, is_img_16_to_9,
 )
 from src.input.KeyBoardController import KeyBoardController, press_key
 from src.input.KeyBoardListener import KeyBoardListener
+from src.input.StaticImageCapturor import StaticImageCapturor
 if is_mac():
     from src.input.GameWindowCapturorForMac import GameWindowCapturor
 else:
@@ -58,6 +60,7 @@ class MapleStoryAutoBot:
         self.color_code = {} # For color code instruction
         self.color_code_up_down = {} # Color code only contain 'up' and 'down'
         self.thread_auto_bot = None # thread for running autobot
+        self.lifecycle_lock = threading.RLock()
         self.cmd_move_x = "none" # "left" "right"
         self.cmd_move_y = "none" # "up" "down"
         self.cmd_action = "none" # "jump" "attack" ....
@@ -70,7 +73,7 @@ class MapleStoryAutoBot:
         self.is_on_ladder = False # Character is on ladder or not
         self.is_show_debug_window = not args.disable_viz #
         self.is_need_show_debug_window = not args.disable_viz #
-        self.is_disable_control = args.disable_control
+        self.is_disable_control = args.disable_control or bool(args.test_image)
         self.is_ui = args.is_ui # Whether is using UI framework to invoke engine
         self.is_frame_done = False #
         # Coordinate (top-left coordinate)
@@ -200,7 +203,8 @@ class MapleStoryAutoBot:
                                                cv2.IMREAD_GRAYSCALE)
 
         # Load misc image
-        lang = cfg["system"]["language"]
+        lang = normalize_language_code(cfg["system"]["language"])
+        cfg["system"]["language"] = lang
         self.img_create_party_enable  = load_image(f"misc/party_button_create_enable_{lang}.png")
         self.img_create_party_disable = load_image(f"misc/party_button_create_disable_{lang}.png")
         self.img_login_button = load_image(f"misc/login_button_{lang}.png")
@@ -217,38 +221,47 @@ class MapleStoryAutoBot:
         '''
         Start all threads
         '''
-        # Start keyboard controller thread
-        self.kb = KeyBoardController(self.cfg)
-        if self.is_disable_control:
-            self.kb.disable() # Disable keyboard controller for debugging
+        with self.lifecycle_lock:
+            if self.thread_auto_bot is not None and self.thread_auto_bot.is_alive():
+                raise RuntimeError("AutoBot is already running")
+            self.is_terminated = False
 
-        # Start game window capturing thread
-        if self.args.test_image == '':
-            self.capture = GameWindowCapturor(self.cfg)
-        else:
-            self.capture = GameWindowCapturor(self.cfg, self.args.test_image)
+            # Start keyboard controller thread
+            self.kb = KeyBoardController(self.cfg)
+            if self.is_disable_control:
+                self.kb.disable() # Disable keyboard controller for debugging
 
-        # Start health monitoring thread
-        self.health_monitor = HealthMonitor(self.cfg, self.kb)
-        if self.cfg["health_monitor"]["enable"] and \
-            not self.is_disable_control:
-            self.health_monitor.start()
+            # Start game window capturing thread
+            if self.args.test_image == '':
+                self.capture = GameWindowCapturor(self.cfg)
+            else:
+                self.capture = StaticImageCapturor(
+                    self.cfg, self.args.test_image
+                )
 
-        # Init profiler
-        self.profiler = Profiler(self.cfg)
+            # Start health monitoring thread
+            self.health_monitor = HealthMonitor(self.cfg, self.kb)
+            if self.cfg["health_monitor"]["enable"] and \
+                not self.is_disable_control:
+                self.health_monitor.start()
 
-        # Reset all timers
-        self.t_last_frame = time.time()
-        self.t_watch_dog = time.time()
-        self.t_last_teleport = time.time()
-        self.t_last_attack = time.time()
-        self.t_last_minimap_update = time.time()
-        self.t_to_change_channel = time.time()
+            # Init profiler
+            self.profiler = Profiler(self.cfg)
 
-        # Start Auto Bot main thread
-        self.thread_auto_bot = threading.Thread(target=self.loop)
-        self.thread_auto_bot.start()
-        self.is_first_frame = True
+            # Reset all timers
+            self.t_last_frame = time.time()
+            self.t_watch_dog = time.time()
+            self.t_last_teleport = time.time()
+            self.t_last_attack = time.time()
+            self.t_last_minimap_update = time.time()
+            self.t_to_change_channel = time.time()
+
+            # Start Auto Bot main thread
+            self.thread_auto_bot = threading.Thread(
+                target=self.loop, name="MapleStoryAutoBot", daemon=True
+            )
+            self.thread_auto_bot.start()
+            self.is_first_frame = True
 
         logger.info("[MapleStoryAutoBot] Started")
 
@@ -1203,16 +1216,26 @@ class MapleStoryAutoBot:
         '''
         terminate all threads
         '''
-        # Terminate keyboard controller
-        if self.kb is not None:
-            self.kb.is_terminated = True
-        # Terminate game window capturor
-        if self.capture is not None:
-            self.capture.stop()
-        # Terminate health monitor
-        if self.health_monitor is not None:
-            self.health_monitor.stop()
-        self.is_terminated = True
+        with self.lifecycle_lock:
+            self.is_terminated = True
+
+            # Signal workers before waiting for the main loop to finish.
+            if self.kb is not None:
+                self.kb.is_terminated = True
+                self.kb.release_all_key()
+            if self.health_monitor is not None:
+                self.health_monitor.stop()
+            if self.capture is not None:
+                self.capture.stop()
+
+            if self.thread_auto_bot is not None and \
+                    self.thread_auto_bot is not threading.current_thread():
+                self.thread_auto_bot.join(timeout=5.0)
+                if self.thread_auto_bot.is_alive():
+                    logger.warning("[MapleStoryAutoBot] Stop timed out")
+
+            if self.kb is not None:
+                self.kb.stop()
         logger.info(f"[terminate_threads] Terminated all threads")
 
     def get_attack_direction(self, monster_left, monster_right):
@@ -1684,7 +1707,7 @@ class MapleStoryAutoBot:
         Only run when call autobot from UI framework and AutoBotController
         '''
         # Make sure player is in party
-        if not is_mac():
+        if not is_mac() and self.args.test_image == '':
             activate_game_window(self.capture.window_title)
             time.sleep(0.3)
             self.ensure_is_in_party()

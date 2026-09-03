@@ -7,6 +7,7 @@ import argparse
 import sys
 import os
 import shutil
+import re
 
 # CV import
 import numpy as np
@@ -93,9 +94,10 @@ class RouteRecorder():
         '''
         update_img_frame_debug
         '''
-        cv2.imshow("Game Window Debug",
-                   self.img_frame_debug[self.cfg["camera"]["y_start"]:
-                                        self.cfg["camera"]["y_end"], :])
+        if self.show_debug_windows:
+            cv2.imshow("Game Window Debug",
+                       self.img_frame_debug[self.cfg["camera"]["y_start"]:
+                                            self.cfg["camera"]["y_end"], :])
         # Update FPS timer
         self.t_last_frame = time.time()
 
@@ -172,15 +174,16 @@ class RouteRecorder():
         return cv2.resize(self.frame, (1296, 759),
                    interpolation=cv2.INTER_NEAREST)
 
-    def __init__(self, args):
+    def __init__(self, args, cfg=None, capture=None):
         '''
         Init MapleStoryBot
         '''
         self.args = args # User arguments
+        self.show_debug_windows = getattr(args, "show_debug_windows", True)
         self.idx_routes = 0 # Index of route map
         self.fps = 0 # Frame per second
         self.is_first_frame = True # first frame flag
-        self.is_enable = True
+        self.is_enable = getattr(args, "start_recording", True)
         # Coordinate (top-left coordinate)
         self.loc_minimap = (0, 0) # minimap location on game screen
         self.loc_player = (0, 0) # player location on game screen
@@ -200,13 +203,15 @@ class RouteRecorder():
         self.t_last_frame = time.time() # Last frame timer, for fps calculation
         self.t_last_draw_blob = time.time() # Last draw blob timer
 
-        # Load defautl yaml config
-        cfg = load_yaml("config/config_default.yaml")
-        # Override with platform config
-        if is_mac():
-            cfg = override_cfg(cfg, load_yaml("config/config_macOS.yaml"))
-        # Override with user customized config
-        self.cfg = override_cfg(cfg, load_yaml(f"config/config_{args.cfg}.yaml"))
+        if cfg is None:
+            # Load default yaml config
+            cfg = load_yaml("config/config_default.yaml")
+            # Override with platform config
+            if is_mac():
+                cfg = override_cfg(cfg, load_yaml("config/config_macOS.yaml"))
+            # Override with user customized config
+            cfg = override_cfg(cfg, load_yaml(f"config/config_{args.cfg}.yaml"))
+        self.cfg = cfg
 
         # Parse color_code
         self.color_code = {
@@ -221,28 +226,100 @@ class RouteRecorder():
 
         self.fps_limit = self.cfg["system"]["fps_limit_route_recorder"]
 
-        # Check create new map directory
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", args.new_map):
+            raise ValueError(
+                "Map ID may contain only letters, numbers, underscores, and hyphens"
+            )
+
+        # Check/create the new map directory.
         map_dir = os.path.join("minimaps", args.new_map)
         if os.path.exists(map_dir):
-            user_input = input(f"[Warning] Directory '{map_dir}' already exists. Replace it? (y/n): ").strip().lower()
-            if user_input == 'y':
+            replace_existing = getattr(args, "replace_existing", None)
+            if replace_existing is None:
+                user_input = input(
+                    f"[Warning] Directory '{map_dir}' already exists. "
+                    "Replace it? (y/n): "
+                ).strip().lower()
+                replace_existing = user_input == 'y'
+            if replace_existing:
                 shutil.rmtree(map_dir)  # Delete existing directory
                 logger.info(f"Removed existing directory: {map_dir}")
             else:
-                sys.exit(0)
+                raise FileExistsError(f"Map directory already exists: {map_dir}")
         os.makedirs(map_dir) # Create new map directory
+        self.map_dir = map_dir
         logger.info(f"Created new directory: {map_dir}")
 
         # Load exist map
         if self.args.map != '':
             self.img_map = load_image(f"{self.args.map}")
 
-        # Start keyboard listener thread
-        self.kb = KeyBoardListener(self.cfg, is_autobot=False)
+        self.kb = None
+        self.capture = None
+        try:
+            # Start keyboard listener thread
+            self.kb = KeyBoardListener(
+                self.cfg,
+                is_autobot=False,
+                capture_function_keys=self.show_debug_windows,
+            )
 
-        # Start game window capturing thread
-        logger.info("Waiting for game window to activate, please click on game window")
-        self.capture = GameWindowCapturor(self.cfg)
+            # Start game window capturing thread
+            logger.info(
+                "Waiting for game window to activate, please click on game window"
+            )
+            self.capture = capture or GameWindowCapturor(self.cfg)
+        except Exception:
+            self.stop()
+            raise
+
+    def set_recording(self, enabled):
+        self.is_enable = enabled
+        logger.info(f"[RouteRecorder] Recording: {enabled}")
+
+    def finish_route(self):
+        if self.img_route is None:
+            raise RuntimeError("Scan the minimap before saving a route")
+        goal_rgb = next(
+            color
+            for color, metadata in self.color_code.items()
+            if metadata["command"].split()[-1] == "goal"
+        )
+        cv2.circle(
+            self.img_route,
+            self.loc_player_global,
+            radius=2,
+            color=goal_rgb[::-1],
+            thickness=-1,
+        )
+        out_path = os.path.join(self.map_dir, f"route{self.idx_routes+1}.png")
+        if not cv2.imwrite(out_path, self.img_route):
+            raise OSError(f"Unable to save route image: {out_path}")
+        self.idx_routes += 1
+        self.img_route = self.img_map.copy()
+        self.loc_player_global_last = None
+        logger.info(f"Save route image to {out_path}")
+        return out_path
+
+    def save_map(self):
+        if self.img_map is None:
+            raise RuntimeError("Scan the minimap before saving the map")
+        out_path = os.path.join(self.map_dir, "map.png")
+        if not cv2.imwrite(out_path, self.img_map):
+            raise OSError(f"Unable to save map image: {out_path}")
+        logger.info(f"Save map image to {out_path}")
+        return out_path
+
+    def stop(self):
+        if self.kb is not None:
+            self.kb.stop()
+            self.kb = None
+        if self.capture is not None:
+            self.capture.stop()
+            self.capture = None
+        if self.show_debug_windows:
+            cv2.destroyAllWindows()
+        logger.info("[RouteRecorder] Terminated")
 
     def ensure_img_map_capacity(self, x, y, h, w):
         '''
@@ -272,6 +349,17 @@ class RouteRecorder():
 
         new_map[expand_top:expand_top + map_h, expand_left:expand_left + map_w] = self.img_map
         self.img_map = new_map
+
+        if self.img_route is not None:
+            self.img_route = cv2.copyMakeBorder(
+                self.img_route,
+                top=expand_top,
+                bottom=expand_bottom,
+                left=expand_left,
+                right=expand_right,
+                borderType=cv2.BORDER_CONSTANT,
+                value=(0, 0, 0),
+            )
 
         # Also update all global coordinates that depend on the map (optional)
         self.loc_minimap_global = (
@@ -395,7 +483,8 @@ class RouteRecorder():
             self.replace_color_on_map((0, 78, 78),
                                       (5, 100, 100))
 
-        cv2.imshow("Map", self.img_map)
+        if self.show_debug_windows:
+            cv2.imshow("Map", self.img_map)
         self.img_route_debug = self.img_route.copy()
 
         # Get player location on global map
@@ -482,18 +571,12 @@ class RouteRecorder():
 
         # Save route image if goal is drawn
         if action == "none none goal":
-            out_path = f"minimaps/{self.args.new_map}/route{self.idx_routes+1}.png"
-            cv2.imwrite(out_path, self.img_route)
-            self.idx_routes += 1
-            self.img_route = self.img_map.copy()
-            logger.info(f"Save route image to {out_path}")
+            self.finish_route()
 
         # Save img_map to map.png
         if self.kb.is_pressed_func_key[3]: # 'F4' is pressed
-            out_path = f"minimaps/{self.args.new_map}/map.png"
-            cv2.imwrite(out_path, self.img_map)
+            self.save_map()
             self.kb.is_pressed_func_key[3] = False
-            logger.info(f"Save map image to {out_path}")
 
         #####################
         ### Debug Windows ###
@@ -515,7 +598,8 @@ class RouteRecorder():
                     fx=self.cfg["minimap"]["debug_window_upscale"],
                     fy=self.cfg["minimap"]["debug_window_upscale"],
                     interpolation=cv2.INTER_NEAREST)
-        cv2.imshow("Route Map Debug", self.img_route_debug)
+        if self.show_debug_windows:
+            cv2.imshow("Route Map Debug", self.img_route_debug)
 
         # Enable cached location since second frame
         self.is_first_frame = False
@@ -551,21 +635,22 @@ if __name__ == '__main__':
         logger.error(f"RouteRecorder Init failed: {e}")
         sys.exit(1)
     else:
-        while True:
-            t_start = time.time()
+        try:
+            while True:
+                t_start = time.time()
 
-            # Process one game window frame
-            routeRecorder.run_once()
+                # Process one game window frame
+                routeRecorder.run_once()
 
-            # Exit if 'q' is pressed
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord('q'):
-                break
+                # Exit if 'q' is pressed
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord('q'):
+                    break
 
-            # Cap FPS to save system resource
-            frame_duration = time.time() - t_start
-            target_duration = 1.0 / routeRecorder.fps_limit
-            if frame_duration < target_duration:
-                time.sleep(target_duration - frame_duration)
-
-        cv2.destroyAllWindows()
+                # Cap FPS to save system resource
+                frame_duration = time.time() - t_start
+                target_duration = 1.0 / routeRecorder.fps_limit
+                if frame_duration < target_duration:
+                    time.sleep(target_duration - frame_duration)
+        finally:
+            routeRecorder.stop()
