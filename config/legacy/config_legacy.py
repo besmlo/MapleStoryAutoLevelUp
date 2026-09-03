@@ -90,32 +90,6 @@ class Config:
     enable_debug_windows = True   # show debug window (false = better performance)
 
     # ────────────────
-    # Runes Warning
-    # ────────────────
-    rune_warning_top_left     = (513, 196)
-    rune_warning_bottom_right = (768, 236)
-    rune_warning_diff_thres = 0.2
-
-    # ────────────────
-    # Rune Detection
-    # ────────────────
-    rune_detect_box_width = 120
-    rune_detect_box_height = 150
-    rune_detect_diff_thres = 0.1
-    rune_finding_timeout = 1200 # second
-    rune_detect_level_coef = 0.1 # raise threshold for each level
-    rune_detect_level_raise_interval = 60 # second
-    near_rune_duration = 5 # second
-
-    # ────────────────
-    # Rune mini-game
-    # ────────────────
-    arrow_box_size = 80 # pixel, 75x75 box
-    arrow_box_interval = 170 # pixel width
-    arrow_box_start_point = (355, 355)
-    arrow_box_diff_thres = 0.2
-
-    # ────────────────
     # HP Bar and HP bar
     # ────────────────
     hp_bar_top_left = (348, 732)

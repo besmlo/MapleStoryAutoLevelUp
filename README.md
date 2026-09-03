@@ -19,9 +19,6 @@ This work purely-based on Computer Vision technique, it doesn't required access 
 |:-------------------------------:|:-------------------------------------------:|
 | Main Tab UI                    | Advanced Settings UI                        |
 
-✅ Auto solve rune
-<img src="media/rune_solve.gif" width="100%">
-
 ✅ Visualization window for debugging
 
 ✅ Auto HP/MP potion drink

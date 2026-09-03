@@ -27,7 +27,7 @@ class MapleStoryBot:
     def __init__(self, args):
         self.cfg = Config # Configuration
         self.args = args
-        self.status = "hunting" # 'resting', 'finding_rune', 'near_rune', 'solving_rune'
+        self.status = "hunting"
         self.idx_routes = 0 # Index of route
         self.hp_ratio = 1.0 # HP bar ratio
         self.mp_ratio = 1.0 # MP bar ratio
@@ -35,7 +35,6 @@ class MapleStoryBot:
         self.monster_info = [] # monster information
         self.fps = 0 # Frame per second
         self.is_first_frame = True # Disable cached location for first frame
-        self.rune_detect_level = 0
         # Coordinate (top-left coordinate)
         self.loc_nametag = (0, 0) # nametag location on window
         self.loc_camera = (0, 0) # camera location on map
@@ -114,27 +113,6 @@ class MapleStoryBot:
         # Load other images
         self.img_nametag = load_image("name_tag.png")
         self.img_nametag_gray = load_image("name_tag.png", cv2.IMREAD_GRAYSCALE)
-        self.img_rune_warning = load_image("rune/rune_warning.png", cv2.IMREAD_GRAYSCALE)
-        self.img_rune = load_image("rune/rune.png")
-        self.img_rune_gray = load_image("rune/rune.png", cv2.IMREAD_GRAYSCALE)
-        self.img_arrows = {
-            "left":
-                [load_image("rune/arrow_left_1.png"),
-                load_image("rune/arrow_left_2.png"),
-                load_image("rune/arrow_left_3.png"),],
-            "right":
-                [load_image("rune/arrow_right_1.png"),
-                load_image("rune/arrow_right_2.png"),
-                load_image("rune/arrow_right_3.png"),],
-            "up":
-                [load_image("rune/arrow_up_1.png"),
-                load_image("rune/arrow_up_2.png"),
-                load_image("rune/arrow_up_3.png")],
-            "down":
-                [load_image("rune/arrow_down_1.png"),
-                load_image("rune/arrow_down_2.png"),
-                load_image("rune/arrow_down_3.png"),],
-        }
 
         # Load monsters images from monster/{monster_name}
         self.monsters = {}
@@ -332,58 +310,6 @@ class MapleStoryBot:
 
         return nearest_monster
 
-    def solve_rune(self):
-        '''
-        Solve the rune puzzle by detecting the arrow directions and pressing corresponding keys.
-        '''
-        while self.is_in_rune_game():
-            for arrow_idx in [0,1,2,3]:
-                # Get lastest game screen frame buffer
-                self.frame = self.capture.get_frame()
-                # Resize game screen to 1296x759
-                self.img_frame = cv2.resize(self.frame, (1296, 759),
-                                            interpolation=cv2.INTER_NEAREST)
-
-                # Crop arrow detection box
-                x = self.cfg.arrow_box_start_point[0] + self.cfg.arrow_box_interval*arrow_idx
-                y = self.cfg.arrow_box_start_point[1]
-                size = self.cfg.arrow_box_size
-                img_roi = self.img_frame[y:y+size, x:x+size]
-
-                # Loop through all possible arrows template and choose the most possible one
-                best_score = float('inf')
-                best_direction = ""
-                for direction, arrow_list in self.img_arrows.items():
-                    for img_arrow in arrow_list:
-                        _, score, _ = find_pattern_sqdiff(
-                                        img_roi, img_arrow,
-                                        mask=get_mask(img_arrow, (0, 255, 0)))
-                        if score < best_score:
-                            best_score = score
-                            best_direction = direction
-                logger.info(f"[solve_rune] Arrow({arrow_idx}) is {best_direction} with score({best_score})")
-
-                # Update img_frame_debug
-                self.img_frame_debug = self.img_frame.copy()
-                draw_rectangle(
-                    self.img_frame_debug, (x, y), (size, size),
-                    (0, 0, 255), str(round(best_score, 2))
-                )
-                # Update debug window
-                self.update_img_frame_debug()
-                cv2.waitKey(1)
-
-                # For logging
-                screenshot(self.img_frame_debug, "solve_rune")
-
-                # Press the key for 0.5 second
-                if not self.args.disable_control:
-                    self.kb.press_key(best_direction, 0.5)
-                time.sleep(1)
-
-
-        logger.info(f"[solve_rune] Solved all arrows")
-
     def is_player_stuck(self):
         """
         Detect if the player is stuck (not moving).
@@ -544,108 +470,6 @@ class MapleStoryBot:
         self.img_frame_debug[y_start+60:y_start+60+exp_h, x_start:x_start+exp_w] = exp_bar
 
         return hp_ratio, mp_ratio, exp_ratio
-
-    def is_rune_warning(self):
-        '''
-        is_rune_warning
-        '''
-        x0, y0 = self.cfg.rune_warning_top_left
-        x1, y1 = self.cfg.rune_warning_bottom_right
-        _, score, _ = find_pattern_sqdiff(
-                        self.img_frame_gray[y0:y1, x0:x1],
-                        self.img_rune_warning)
-        if self.status == "hunting" and score < self.cfg.rune_warning_diff_thres:
-            logger.info(f"[is_rune_warning] Detect rune warning on screen with score({score})")
-            return True
-        else:
-            return False
-
-    def is_rune_near_player(self):
-        '''
-        is_rune_near_player
-        '''
-        # Calculate bounding box
-        h, w = self.img_frame.shape[:2]
-        x0 = max(0, self.loc_player[0] - self.cfg.rune_detect_box_width // 2)
-        y0 = max(0, self.loc_player[1] - self.cfg.rune_detect_box_height)
-        x1 = min(w, self.loc_player[0] + self.cfg.rune_detect_box_width // 2)
-        y1 = min(h, self.loc_player[1])
-
-        # Debug
-        draw_rectangle(
-            self.img_frame_debug, (x0, y0), (y1-y0, x1-x0),
-            (255, 0, 0), "Rune Detection Range"
-        )
-
-        # Find rune icon near player
-        if  (x1 - x0) < self.img_rune.shape[1] or \
-            (y1 - y0) < self.img_rune.shape[0]:
-            return False # Skip check if box is out of range
-        else:
-            img_roi = self.img_frame[y0:y1, x0:x1]
-            loc_rune, score, _ = find_pattern_sqdiff(
-                            img_roi,
-                            self.img_rune,
-                            mask=get_mask(self.img_rune, (0, 255, 0)))
-            # # Draw rectangle for debug
-            # draw_rectangle(
-            #     self.img_frame_debug,
-            #     (x0 + loc_rune[0], y0 + loc_rune[1]),
-            #     self.img_rune.shape,
-            #     (255, 0, 255),  # purple in BGR
-            #     f"Rune,{round(score, 2)}"
-            # )
-            detect_thres = self.cfg.rune_detect_diff_thres + self.rune_detect_level*self.cfg.rune_detect_level_coef
-            if score < detect_thres:
-                logger.info(f"[Rune Detect] Found rune near player with score({score})," + \
-                            f"level({self.rune_detect_level}),threshold({detect_thres})")
-                # Draw rectangle for debug
-                draw_rectangle(
-                    self.img_frame_debug,
-                    (x0 + loc_rune[0], y0 + loc_rune[1]),
-                    self.img_rune.shape,
-                    (255, 0, 255),  # purple in BGR
-                    f"Rune,{round(score, 2)}"
-                )
-                screenshot(self.img_frame_debug, "rune_detected")
-
-                return True
-            else:
-                return False
-
-    def is_in_rune_game(self):
-        '''
-        is_in_rune_game
-        '''
-        # Get lastest game screen frame buffer
-        self.frame = self.capture.get_frame()
-        # Resize game screen to 1296x759
-        self.img_frame = cv2.resize(self.frame, (1296, 759), interpolation=cv2.INTER_NEAREST)
-
-        # Crop arrow detection box
-        x, y = self.cfg.arrow_box_start_point
-        size = self.cfg.arrow_box_size
-        img_roi = self.img_frame[y:y+size, x:x+size]
-
-        # Check if arrow exist on screen
-        best_score = float('inf')
-        for direc, arrow_list in self.img_arrows.items():
-            for img_arrow in arrow_list:
-                _, score, _ = find_pattern_sqdiff(
-                                img_roi, img_arrow,
-                                mask=get_mask(img_arrow, (0, 255, 0)))
-                if score < best_score:
-                    best_score = score
-
-        draw_rectangle(
-            self.img_frame_debug, (x, y), (size, size),
-            (0, 0, 255), str(round(best_score, 2))
-        )
-
-        if best_score < self.cfg.arrow_box_diff_thres:
-            logger.info(f"Arrow screen detected with score({score})")
-            return True
-        return False
 
     def get_monsters_in_range(self, top_left, bottom_right):
         '''
@@ -1166,11 +990,6 @@ class MapleStoryBot:
         # Detect HP/MP/EXP bar on UI
         self.hp_ratio, self.mp_ratio, self.exp_ratio = self.get_hp_mp_exp()
 
-        # Check whether "PLease remove runes" warning appears on screen
-        if self.is_rune_warning():
-            self.rune_detect_level = 0
-            self.switch_status("finding_rune")
-
         # Get player location in game window
         self.loc_player = self.get_player_location()
 
@@ -1182,31 +1001,6 @@ class MapleStoryBot:
         else:
             if not self.args.patrol:
                 self.loc_player_global = self.get_player_location_global()
-
-        # Check whether a rune icon is near player
-        if self.is_rune_near_player():
-            self.switch_status("near_rune")
-
-        # Check whether we entered the rune mini-game
-        if self.status == "near_rune":
-            # stop character
-            self.kb.set_command("stop")
-            time.sleep(0.1) # Wait for character to stop
-            self.kb.disable() # Disable kb thread during rune solving
-
-            # Attempt to trigger rune
-            if not self.args.disable_control:
-                self.kb.press_key("up", 0.02)
-            time.sleep(1) # Wait rune game to pop up
-
-            # If entered the game, start solving rune
-            if self.is_in_rune_game():
-                self.solve_rune() # Blocking until runes solved
-                self.rune_detect_level = 0 # reset rune detect level
-                self.switch_status("hunting")
-
-            # Restore kb thread
-            self.kb.enable()
 
         # Get all monster near player
         if self.args.attack == "aoe_skill":
@@ -1335,21 +1129,6 @@ class MapleStoryBot:
             #         time.time() - self.t_last_teleport > self.cfg.teleport_cooldown:
             #         command = command.replace("walk", "teleport")
             #         self.t_last_teleport = time.time() # update timer
-
-        elif self.status == "finding_rune":
-            if self.is_player_stuck():
-                command = self.get_random_action()
-            # Check if finding rune timeout
-            if time.time() - self.t_last_switch_status > self.cfg.rune_finding_timeout:
-                self.rune_detect_level = 0 # reset level
-                self.switch_status("resting")
-            # Check if need to raise level to lower the detection threshold
-            self.rune_detect_level = int(time.time() - self.t_last_switch_status) // self.cfg.rune_detect_level_raise_interval
-
-        elif self.status == "near_rune":
-            # Stay in near_rune status for only a few seconds
-            if time.time() - self.t_last_switch_status > self.cfg.near_rune_duration:
-                self.switch_status("hunting")
 
         elif self.status == "resting":
             self.img_routes = [self.img_route_rest] # Set up resting route

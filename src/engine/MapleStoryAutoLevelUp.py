@@ -34,12 +34,8 @@ else:
     from src.input.GameWindowCapturor import GameWindowCapturor
 from src.engine.HealthMonitor import HealthMonitor
 from src.engine.Profiler import Profiler
-from src.engine.RuneSolver import RuneSolver
 from src.engine.FiniteStateMachine import FiniteStateMachine
 from src.states.hunting import HuntingState
-from src.states.finding_rune import FindingRuneState
-from src.states.near_rune import NearRuneState
-from src.states.solving_rune import SolvingRuneState
 from src.states.auxiliary import AuxiliaryState
 from src.states.patrol import PatrolState
 
@@ -117,23 +113,12 @@ class MapleStoryAutoBot:
         self.capture = None # Game window capturor
         self.health_monitor = None # Health monitor
         self.profiler = None # Profiler, for performance issue debugging
-        self.rune_solver = None # Rune solver
 
         # Finite State Machine
         self.fsm = FiniteStateMachine()
         self.fsm.add_state(HuntingState    ("hunting"     , self))
-        self.fsm.add_state(FindingRuneState("finding_rune", self))
-        self.fsm.add_state(NearRuneState   ("near_rune"   , self))
-        self.fsm.add_state(SolvingRuneState("solving_rune", self))
         self.fsm.add_state(AuxiliaryState  ("aux"         , self))
         self.fsm.add_state(PatrolState     ("patrol"      , self))
-        self.fsm.add_transition("hunting", "finding_rune")
-        self.fsm.add_transition("finding_rune", "hunting")
-        self.fsm.add_transition("finding_rune", "near_rune")
-        self.fsm.add_transition("finding_rune", "solving_rune")
-        self.fsm.add_transition("near_rune", "finding_rune")
-        self.fsm.add_transition("near_rune", "solving_rune")
-        self.fsm.add_transition("solving_rune", "hunting")
         self.fsm.set_init_state("hunting")
 
     def update_signals(self, image_debug_signal, route_map_viz_signal):
@@ -251,9 +236,6 @@ class MapleStoryAutoBot:
 
         # Init profiler
         self.profiler = Profiler(self.cfg)
-
-        # Init rune solver
-        self.rune_solver = RuneSolver(self.cfg)
 
         # Reset all timers
         self.t_last_frame = time.time()

@@ -8,15 +8,7 @@ class HuntingState(State):
         pass
 
     def check_transitions(self):
-        if self.bot.rune_solver.is_rune_enable(
-            self.bot.img_frame_gray, self.bot.img_frame_debug) or \
-            self.bot.rune_solver.is_rune_warning(
-            self.bot.img_frame_gray, self.bot.img_frame_debug):
-            # When "Rune enable" message appears on screen
-            return "finding_rune"
-
-        else:
-            return None
+        return None
 
     def on_frame(self):
         # Get commend from route map
