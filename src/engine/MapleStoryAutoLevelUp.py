@@ -1700,17 +1700,16 @@ class MapleStoryAutoBot:
             # Only proceed if the frame is valid
             if ret == 0:
                 # Draw image on debug window
-                if self.is_show_debug_window and self.is_ui:
+                if self.is_show_debug_window and self.is_ui and \
+                        self.img_frame_debug is not None:
                     img_frame_debug_emit = self.img_frame_debug[
                         self.cfg["camera"]["y_start"]:
                         self.cfg["camera"]["y_end"], :].copy()
-                    img_route_debug_emit = self.img_route_debug.copy()
                     self.image_debug_signal.emit(img_frame_debug_emit)
+                    img_route_debug_emit = None
+                    if self.img_route_debug is not None:
+                        img_route_debug_emit = self.img_route_debug.copy()
                     self.route_map_viz_signal.emit(img_route_debug_emit)
-            else:
-                pass
-                # logger.warning("Skipped debug window update due to invalid frame.")
-
             self.is_frame_done = True
 
             # Cap FPS to save system resource

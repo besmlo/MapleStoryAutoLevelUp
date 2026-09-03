@@ -10,5 +10,7 @@ test/
 *.prof
 *.config_tmp.yaml
 *config_custom.yaml
+.env
+.env.*
 *.exe
 *.spec

@@ -7,7 +7,7 @@ import logging
 # PySide 6
 from PySide6.QtWidgets import (
     QLabel, QWidget, QHBoxLayout, QSizePolicy, QKeySequenceEdit, QComboBox,
-    QGroupBox, QCheckBox, QFormLayout, QLineEdit, QLabel, QWidget, QHBoxLayout
+    QGroupBox, QCheckBox, QFormLayout, QLineEdit
 )
 from PySide6.QtCore import Qt, QObject, Signal
 from PySide6.QtGui import QKeySequence, QKeyEvent, QDoubleValidator, QIntValidator
@@ -55,12 +55,12 @@ def create_field(label_text, field_widget):
 
     return container
 
-def clear_debug_canvas(canvas):
+def clear_debug_canvas(canvas, message="Press start or 'F1' to start AutoBot"):
     '''
     Flush the debug window viz canvas
     '''
     canvas.clear()
-    canvas.setText("Press start or 'F1' to start AutoBot")
+    canvas.setText(message)
     canvas.setAlignment(Qt.AlignCenter)
 
 class SingleKeyEdit(QKeySequenceEdit):

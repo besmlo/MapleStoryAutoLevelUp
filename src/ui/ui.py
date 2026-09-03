@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QPushButton, QLabel, QVBoxLayout, QWidget,
     QCheckBox, QListWidget, QFileDialog, QHBoxLayout, QLineEdit,
     QPlainTextEdit, QTabWidget, QGroupBox, QFormLayout,
-    QSizePolicy, QComboBox, QListWidgetItem, QScrollArea
+    QSizePolicy, QComboBox, QListWidgetItem, QScrollArea, QSplitter
 )
 from PySide6.QtGui import QTextCharFormat, QColor, QTextCursor, QPixmap, QImage, QIcon
 from PySide6.QtCore import Qt, Signal
@@ -33,15 +33,13 @@ if is_mac():
     TAB_WINDOW_SIZE = {
         'Main': (700, 800),
         'Advanced Settings': (750, 800),
-        'Game Window Viz': (850, 430), # smaller for macbook screen
-        'Route Map Viz': (400, 400),
+        'Monitoring': (1000, 650), # smaller for macbook screen
     }
 else:
     TAB_WINDOW_SIZE = {
         'Main': (700, 800),
         'Advanced Settings': (750, 800),
-        'Game Window Viz': (1280, 650),
-        'Route Map Viz': (800, 800),
+        'Monitoring': (1280, 700),
     }
 
 ADV_SETTINGS_HIDE = ['key', 'bot'] # cfg tile here will not shown in advanced settings tabs
@@ -85,14 +83,12 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         self.tab_main = self.setup_main_tab()
         self.tab_advance_setting = self.setup_advance_setting_tab()
-        self.tab_game_window_viz = self.setup_game_window_viz_tab()
-        self.tab_route_map_viz = self.setup_route_map_viz_tab()
+        self.tab_monitoring = self.setup_monitoring_tab()
 
         # Add tabs to tab widget
         self.tabs.addTab(self.tab_main, "Main")
         self.tabs.addTab(self.tab_advance_setting, "Advanced Settings")
-        self.tabs.addTab(self.tab_game_window_viz, "Game Window Viz")
-        self.tabs.addTab(self.tab_route_map_viz, "Route Map Viz")
+        self.tabs.addTab(self.tab_monitoring, "Monitoring")
 
         # Change tabs signals
         self.tabs.currentChanged.connect(self.on_tab_changed)
@@ -193,31 +189,34 @@ class MainWindow(QMainWindow):
 
         return tab_advance_setting
 
-    def setup_game_window_viz_tab(self):
-        tab_game_window_viz = QWidget()
-        layout = QVBoxLayout()
-        tab_game_window_viz.setLayout(layout)
+    def _create_monitoring_panel(self, title, empty_message):
+        panel = QGroupBox(title)
+        layout = QVBoxLayout(panel)
+        canvas = QLabel()
+        canvas.setMinimumSize(240, 180)
+        canvas.setStyleSheet("background-color: black; color: white;")
+        clear_debug_canvas(canvas, empty_message)
+        layout.addWidget(canvas)
+        return panel, canvas
 
-        # Create a large QLabel as a canvas
-        self.debug_canvas = QLabel()
-        clear_debug_canvas(self.debug_canvas)
-        self.debug_canvas.setStyleSheet("background-color: black; color: white;")
-        layout.addWidget(self.debug_canvas)
+    def setup_monitoring_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        splitter = QSplitter(Qt.Horizontal)
 
-        return tab_game_window_viz
+        game_panel, self.debug_canvas = self._create_monitoring_panel(
+            "Game Detection", "Start AutoBot to view game detection"
+        )
+        route_panel, self.route_map_canvas = self._create_monitoring_panel(
+            "Route Map", "Route preview is available in normal mode"
+        )
 
-    def setup_route_map_viz_tab(self):
-        tab_route_map_viz_tab = QWidget()
-        layout = QVBoxLayout()
-        tab_route_map_viz_tab.setLayout(layout)
-
-        # Create a large QLabel as a canvas
-        self.route_map_canvas = QLabel()
-        clear_debug_canvas(self.route_map_canvas)
-        self.route_map_canvas.setStyleSheet("background-color: black; color: white;")
-        layout.addWidget(self.route_map_canvas)
-
-        return tab_route_map_viz_tab
+        splitter.addWidget(game_panel)
+        splitter.addWidget(route_panel)
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 2)
+        layout.addWidget(splitter)
+        return tab
 
     def save_ui_state(self):
         path = os.path.join(os.path.expanduser("~"), ".maplebot_ui_state.json")
@@ -541,7 +540,6 @@ class MainWindow(QMainWindow):
 
         gbox.setLayout(layout)
         return gbox
-        logger.info(f"[UI] Map selected: {map_name}")
 
     def create_attack_widget(self):
         '''
@@ -756,10 +754,7 @@ class MainWindow(QMainWindow):
 
     def on_tab_changed(self, index):
         tab_name = self.tabs.tabText(index)
-        if tab_name == "Game Window Viz":
-            self.controller.enable_bot_viz()
-
-        elif tab_name == "Route Map Viz":
+        if tab_name == "Monitoring":
             self.controller.enable_bot_viz()
 
         elif tab_name == "Main":
@@ -858,8 +853,13 @@ class MainWindow(QMainWindow):
             self.button_start_pause.setStyleSheet("")
             self.controller.pause_bot()
             self.set_gbox_enabled(True)
-            clear_debug_canvas(self.debug_canvas) # Set debug viz to null
-            clear_debug_canvas(self.route_map_canvas) # Set debug viz to null
+            clear_debug_canvas(
+                self.debug_canvas, "Start AutoBot to view game detection"
+            )
+            clear_debug_canvas(
+                self.route_map_canvas,
+                "Route preview is available in normal mode",
+            )
 
     def toggle_screenshot_ui(self):
         self.controller.take_screenshot()
@@ -937,36 +937,33 @@ class MainWindow(QMainWindow):
 
     def update_debug_canvas(self, img):
         if img is None:
+            clear_debug_canvas(
+                self.debug_canvas, "Start AutoBot to view game detection"
+            )
             return
-
-        height, width, _ = img.shape
-        qimg = QImage(img.data, width, height, QImage.Format_BGR888)
-        pixmap = QPixmap.fromImage(qimg)
-
-        # Scale the image to fit label size but maintain aspect ratio
-        scaled_pixmap = pixmap.scaled(
-                            self.debug_canvas.width(),
-                            self.debug_canvas.height(),
-                            Qt.KeepAspectRatio,
-                            Qt.SmoothTransformation)
-
-        self.debug_canvas.setPixmap(scaled_pixmap)
+        self._update_image_canvas(self.debug_canvas, img)
 
     def update_route_map_canvas(self, img):
         if img is None:
+            clear_debug_canvas(
+                self.route_map_canvas,
+                "Route preview is available in normal mode",
+            )
             return
+        self._update_image_canvas(self.route_map_canvas, img)
 
+    @staticmethod
+    def _update_image_canvas(canvas, img):
         height, width, _ = img.shape
         qimg = QImage(img.data, width, height, QImage.Format_BGR888)
         pixmap = QPixmap.fromImage(qimg)
-
         scaled_pixmap = pixmap.scaled(
-                            self.route_map_canvas.width(),
-                            self.route_map_canvas.height(),
-                            Qt.KeepAspectRatio,
-                            Qt.SmoothTransformation)
-
-        self.route_map_canvas.setPixmap(scaled_pixmap)
+            canvas.width(),
+            canvas.height(),
+            Qt.KeepAspectRatio,
+            Qt.SmoothTransformation,
+        )
+        canvas.setPixmap(scaled_pixmap)
 
     def update_advance_setting_ui_from_cfg(self):
         '''

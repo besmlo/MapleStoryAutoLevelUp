@@ -19,7 +19,7 @@ This work purely-based on Computer Vision technique, it doesn't required access 
 |:-------------------------------:|:-------------------------------------------:|
 | Main Tab UI                    | Advanced Settings UI                        |
 
-✅ Visualization window for debugging
+✅ Game detection and route previews share one `Monitoring` tab in UI mode
 
 ✅ Auto HP/MP potion drink
 
@@ -44,6 +44,20 @@ It also supports global server, select config/config_global.yaml in load config 
 pip install -r requirements.txt
 ```
 
+### Email credential security
+
+Never save email credentials in tracked YAML or Python files. The email test
+tool reads its settings from environment variables. For PowerShell:
+
+```powershell
+$env:MAPLEBOT_EMAIL_SENDER = "sender@example.com"
+$env:MAPLEBOT_EMAIL_PASSWORD = "your-app-password"
+$env:MAPLEBOT_EMAIL_RECEIVER = "receiver@example.com"
+python -m tools.email_test
+```
+
+Use a dedicated app password rather than the email account's primary password.
+
 ## Preparation
 1. Run MapleStory and make sure the game is on windowed mode and game window size is resized to smallest
 2. Turn on minimap on the top-left corner of the game window
@@ -51,12 +65,15 @@ pip install -r requirements.txt
 
 ## Run
 
-### Run with UI (Recommand)
+### Run with UI (Recommended)
 Run command
 ```
 python -m src.main
 ```
 Press 'F1' or 'start' button to start auto bot
+
+Open the `Monitoring` tab to view the game detection and route map side by side.
+The standalone developer mode keeps its original OpenCV debug windows.
 
 Tune the configuration to suit your character
 
