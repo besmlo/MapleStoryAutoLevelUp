@@ -43,6 +43,12 @@ if is_mac():
 else:
     from src.input.GameWindowCapturor import GameWindowCapturor
 from src.engine.BotConfigLoader import ConfigResourceError, load_bot_resources
+from src.engine.BotPolicies import (
+    choose_attack_direction,
+    evaluate_other_players,
+    evaluate_scheduled_switch,
+    evaluate_watchdog,
+)
 from src.engine.BotRuntime import BotRuntime
 from src.engine.CombatAnalyzer import CombatAnalyzer
 from src.engine.FiniteStateMachine import FiniteStateMachine
@@ -51,7 +57,11 @@ from src.engine.HealthMonitor import HealthMonitor
 from src.engine.MonsterDetector import MonsterDetector
 from src.engine.PlayerLocator import PlayerLocator
 from src.engine.Profiler import Profiler
-from src.engine.RouteAnalyzer import find_nearest_actions
+from src.engine.RouteAnalyzer import (
+    find_edge_side,
+    find_nearest_actions,
+    merge_route_commands,
+)
 from src.states.auxiliary import AuxiliaryState
 from src.states.hunting import HuntingState
 from src.states.patrol import PatrolState
@@ -489,24 +499,23 @@ class MapleStoryAutoBot:
         Returns:
             bool: True if the player is stuck, False otherwise.
         """
-        dx = abs(self.loc_player_global[0] - self.loc_watch_dog[0])
-        dy = abs(self.loc_player_global[1] - self.loc_watch_dog[1])
-
         current_time = time.time()
-        if dx + dy > self.cfg["watchdog"]["range"]:
-            # Player moved, reset watchdog timer
-            self.loc_watch_dog = self.loc_player_global
-            self.t_watch_dog = current_time
-            return False
-
-        dt = current_time - self.t_watch_dog
-        if dt > self.cfg["watchdog"]["timeout"]:
-            # watch dog idle for too long, player stuck
-            self.loc_watch_dog = self.loc_player_global
-            self.t_watch_dog = current_time
-            logger.warning(f"[is_player_stuck] Player stuck for {round(dt, 2)} seconds.")
-            return True
-        return False
+        decision = evaluate_watchdog(
+            self.loc_player_global,
+            self.loc_watch_dog,
+            self.t_watch_dog,
+            self.cfg["watchdog"]["range"],
+            self.cfg["watchdog"]["timeout"],
+            current_time,
+        )
+        self.loc_watch_dog = decision.watched_location
+        self.t_watch_dog = decision.checked_at
+        if decision.is_stuck:
+            logger.warning(
+                "[is_player_stuck] Player stuck for "
+                f"{round(decision.elapsed, 2)} seconds."
+            )
+        return decision.is_stuck
 
     def screenshot_img_frame(self):
         '''
@@ -533,40 +542,13 @@ class MapleStoryAutoBot:
                 - "edge on right"
                 - "" (empty string if no edge is detected nearby)
         '''
-        x0, y0 = self.loc_player_global
-        h, w = self.img_route.shape[:2]
-        h_trigger_box = self.cfg["edge_teleport"]["trigger_box_height"]
-        w_trigger_box = self.cfg["edge_teleport"]["trigger_box_width"]
-        x_min = max(0, x0 - w_trigger_box//2)
-        x_max = min(w, x0 + w_trigger_box//2)
-        y_min = max(0, y0 - h_trigger_box//2)
-        y_max = min(h, y0 + h_trigger_box//2)
-
-        # Debug: draw search box
-        # draw_rectangle(
-        #     self.img_route_debug,
-        #     (x_min, y_min),
-        #     (y_max - y_min, x_max - x_min),
-        #     (0, 0, 255), "Edge Check", thickness=1, text_height=0.4
-        # )
-
-        # Find mask of matching pixels
-        roi = self.img_route[y_min:y_max, x_min:x_max]
-        mask = np.all(roi == self.cfg["edge_teleport"]["color_code"], axis=2)
-        coords = np.column_stack(np.where(mask))
-
-        # No edge pixel
-        if coords.size == 0:
-            return ""
-
-        # Calculate mean position of matching pixels
-        mean_x = np.mean(coords[:, 1])
-
-        # Compare to roi center
-        if mean_x < x0:
-            return "edge on left"
-        else:
-            return "edge on right"
+        return find_edge_side(
+            self.img_route,
+            self.loc_player_global,
+            self.cfg["edge_teleport"]["trigger_box_width"],
+            self.cfg["edge_teleport"]["trigger_box_height"],
+            self.cfg["edge_teleport"]["color_code"],
+        )
 
     def update_info_on_img_frame_debug(self):
         '''
@@ -785,126 +767,62 @@ class MapleStoryAutoBot:
         '''
         get_attack_direction
         '''
-        # Compute distance for left
-        distance_left = float('inf')
-        if monster_left is not None:
-            mx, my = monster_left["position"]
-            mw, mh = monster_left["size"]
-            center_left = (mx + mw // 2, my + mh // 2)
-            distance_left = abs(center_left[0] - self.loc_player[0]) + \
-                            abs(center_left[1] - self.loc_player[1])
-        # Compute distance for right
-        distance_right = float('inf')
-        if monster_right is not None:
-            mx, my = monster_right["position"]
-            mw, mh = monster_right["size"]
-            center_right = (mx + mw // 2, my + mh // 2)
-            distance_right = abs(center_right[0] - self.loc_player[0]) + \
-                            abs(center_right[1] - self.loc_player[1])
-        # Choose attack direction and nearest monster
-        attack_direction = None
-        # nearest_monster = None
-
-        # Additional validation: check if monster is actually on the correct side
-        def is_monster_on_correct_side(monster, direction):
-            if monster is None:
-                return False
-            mx, my = monster["position"]
-            mw, mh = monster["size"]
-            monster_center_x = mx + mw // 2
-            player_x = self.loc_player[0]
-
-            if direction == "left":
-                return monster_center_x < player_x  # Monster should be left of player
-            else:  # direction == "right"
-                return monster_center_x > player_x  # Monster should be right of player
-
-        # Only choose direction if there's a clear winner and monster is on correct side
-        if monster_left is not None and monster_right is None and \
-            is_monster_on_correct_side(monster_left, "left"):
-            attack_direction = "left"
-            # nearest_monster = monster_left
-        elif monster_right is not None and monster_left is None and \
-            is_monster_on_correct_side(monster_right, "right"):
-            attack_direction = "right"
-            # nearest_monster = monster_right
-        elif monster_left is not None and monster_right is not None:
-            # Both sides have monsters, check distance and side validation
-            left_valid = is_monster_on_correct_side(monster_left, "left")
-            right_valid = is_monster_on_correct_side(monster_right, "right")
-
-            if left_valid and not right_valid:
-                attack_direction = "left"
-                # nearest_monster = monster_left
-            elif right_valid and not left_valid:
-                attack_direction = "right"
-                # nearest_monster = monster_right
-            elif left_valid and right_valid and distance_left < distance_right - 50:
-                attack_direction = "left"
-                # nearest_monster = monster_left
-            elif left_valid and right_valid and distance_right < distance_left - 50:
-                attack_direction = "right"
-                # nearest_monster = monster_right
-            # If both valid but distances too close, don't attack to avoid confusion
+        decision = choose_attack_direction(
+            monster_left,
+            monster_right,
+            self.loc_player,
+        )
 
         # Debug attack direction selection
         if monster_left is not None or monster_right is not None:
-            left_side_ok = is_monster_on_correct_side(monster_left, "left") if monster_left else False
-            right_side_ok = is_monster_on_correct_side(monster_right, "right") if monster_right else False
-            debug_text = f"L:{distance_left:.0f}({left_side_ok}) R:{distance_right:.0f}({right_side_ok}) Dir:{attack_direction}"
+            debug_text = (
+                f"L:{decision.distance_left:.0f}({decision.left_is_valid}) "
+                f"R:{decision.distance_right:.0f}({decision.right_is_valid}) "
+                f"Dir:{decision.direction}"
+            )
             cv2.putText(self.img_frame_debug, debug_text,
                         (10, 450), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 2)
-        return attack_direction
+        return decision.direction
 
     def is_need_change_channel(self, loc_other_players):
         '''
         is_need_change_channel
         '''
-        # Calculate center value
-        xs = [x for (x, _) in loc_other_players]
-        ys = [y for (_, y) in loc_other_players]
-        if len(xs) == 0 or len(ys) == 0:
-            return False
-        center_x, center_y = (np.mean(xs), np.mean(ys))
-        if np.isnan(center_x) or np.isnan(center_y):
-            return False
-        center = (int(np.mean(xs)), int(np.mean(ys)))
-        #logger.info(f"[is_need_change_channel] Center of mass = {center}")
-
-        # Change channel
         mode = self.cfg["channel_change"]["mode"]
-        if mode == "true":
+        threshold = self.cfg["channel_change"]["other_player_move_thres"]
+        decision = evaluate_other_players(
+            loc_other_players,
+            self.red_dot_center_prev,
+            mode,
+            threshold,
+        )
+        self.red_dot_center_prev = decision.center
+        if mode == "true" and decision.should_change:
             logger.warning("[is_need_change_channel] Player detected, immediately change channel.")
-            return True
-        elif mode == "pixel":
-            if self.red_dot_center_prev is None:
-                self.red_dot_center_prev = center
-            else:
-                dx = abs(center[0] - self.red_dot_center_prev[0])
-                dy = abs(center[1] - self.red_dot_center_prev[1])
-                total = dx + dy
-                logger.debug(f"[is_need_change_channel] Movement dx={dx}, dy={dy}, total={total}")
-                thres = self.cfg["channel_change"]["other_player_move_thres"]
-                if total > thres:
-                    logger.warning(f"Other player movement > {thres} pixel detected. "
-                                "Trigger channel change.")
-                    return True
-        else:
+        elif mode == "pixel" and decision.movement is not None:
+            logger.debug(
+                f"[is_need_change_channel] Movement total={decision.movement}"
+            )
+            if decision.should_change:
+                logger.warning(
+                    f"Other player movement > {threshold} pixel detected. "
+                    "Trigger channel change."
+                )
+        elif not decision.is_supported_mode:
             logger.error(f"[is_need_change_channel] Unsupported mode: {mode}")
-
-        return False
+        return decision.should_change
 
     def is_time_to_change_channel(self):
         '''
         is_time_to_change_channel
         '''
-        if not self.cfg["scheduled_channel_switching"]["enable"]:
-            return False
-        dt = time.time() - self.t_to_change_channel
-        if dt > self.cfg["scheduled_channel_switching"]["interval_seconds"]:
-            self.t_to_change_channel = time.time()
-            return True
-        return False
+        should_change, self.t_to_change_channel = evaluate_scheduled_switch(
+            self.cfg["scheduled_channel_switching"]["enable"],
+            self.t_to_change_channel,
+            self.cfg["scheduled_channel_switching"]["interval_seconds"],
+            time.time(),
+        )
+        return should_change
 
     def get_login_button_location(self):
         '''
@@ -928,24 +846,13 @@ class MapleStoryAutoBot:
     def update_cmd_by_route(self):
         # get color code from img_route
         color_code, color_code_up_down = self.get_nearest_color_code()
-        # Use color_code and color_code_up_down to complement each other
-        # To prevent character stuck at the end of ladder, we use two color color pixels
-        # and let them complement with each other, to ensure smoothy ladder climbing
-        if color_code and color_code_up_down:
-            if color_code["distance"] < color_code_up_down["distance"]:
-                self.cmd_move_x, self.cmd_move_y, self.cmd_action = color_code["command"].split()
-                _, cmd, _ = color_code_up_down["command"].split()
-                if self.cmd_move_y == "none" and self.is_on_ladder:
-                    self.cmd_move_y = cmd # only complement cmd_move_y when player is on ladder
-            else:
-                self.cmd_move_x, self.cmd_move_y, self.cmd_action = color_code_up_down["command"].split()
-                cmd, _, _ = color_code["command"].split()
-                if self.cmd_move_x == "none" and self.is_on_ladder:
-                    self.cmd_move_x = cmd # only complement cmd_move_x when player is on ladder
-        elif color_code:
-            self.cmd_move_x, self.cmd_move_y, self.cmd_action = color_code["command"].split()
-        elif color_code_up_down:
-            self.cmd_move_x, self.cmd_move_y, self.cmd_action = color_code_up_down["command"].split()
+        command = merge_route_commands(
+            color_code,
+            color_code_up_down,
+            self.is_on_ladder,
+        )
+        if command is not None:
+            self.cmd_move_x, self.cmd_move_y, self.cmd_action = command
 
         # teleport away from edge to avoid falling off cliff
         if self.is_near_edge() and \
