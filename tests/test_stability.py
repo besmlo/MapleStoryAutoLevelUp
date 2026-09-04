@@ -1,6 +1,6 @@
-from argparse import Namespace
 import time
 import unittest
+from argparse import Namespace
 from unittest.mock import patch
 
 import numpy as np
@@ -35,6 +35,14 @@ class FakeCapture:
 
     def stop(self):
         self.stopped = True
+
+
+class StaticFrameCapture:
+    def __init__(self, frame):
+        self.frame = frame
+
+    def get_frame(self):
+        return self.frame.copy()
 
 
 class FakeHealthMonitor:
@@ -77,6 +85,39 @@ class StabilityTest(unittest.TestCase):
 
         capture.stop()
         self.assertIsNone(capture.get_frame())
+
+    def test_normal_mode_accepts_and_normalizes_current_window_size(self):
+        bot = MapleStoryAutoBot.__new__(MapleStoryAutoBot)
+        bot.capture = StaticFrameCapture(
+            np.zeros((932, 1602, 3), dtype=np.uint8)
+        )
+        bot.args = Namespace(test_image="")
+        bot.cfg = {
+            "bot": {"mode": "normal"},
+            "game_window": {
+                "size": (752, 1282),
+                "ratio_tolerance": 0.08,
+            },
+        }
+
+        frame = bot.get_img_frame()
+
+        self.assertEqual(frame.shape, (759, 1296, 3))
+
+    def test_party_check_handles_missing_frame_without_crashing(self):
+        bot = MapleStoryAutoBot.__new__(MapleStoryAutoBot)
+        bot.cfg = {"key": {"party": "p"}}
+        bot.get_img_frame = lambda: None
+
+        with patch(
+            "src.engine.MapleStoryAutoLevelUp.press_key"
+        ) as press_key_mock, patch(
+            "src.engine.MapleStoryAutoLevelUp.time.sleep"
+        ):
+            result = bot.ensure_is_in_party()
+
+        self.assertFalse(result)
+        self.assertEqual(press_key_mock.call_count, 2)
 
     def test_bot_can_stop_cleanly_and_start_again(self):
         args = Namespace(

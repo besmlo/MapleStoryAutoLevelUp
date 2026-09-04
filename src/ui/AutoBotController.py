@@ -1,16 +1,17 @@
 # Standard Import
-from argparse import Namespace
 import sys
+from argparse import Namespace
 
 # Pyside
-from PySide6.QtCore import Signal, QObject, QTimer
+from PySide6.QtCore import QObject, Signal
 
 #  Local Import
 from src.engine.MapleStoryAutoLevelUp import MapleStoryAutoBot
-from src.utils.logger import logger
-from src.utils.common import load_yaml
 from src.input.KeyBoardListener import KeyBoardListener
 from src.ui.RouteRecorderController import RouteRecorderController
+from src.utils.common import load_yaml
+from src.utils.logger import logger
+
 
 class AutoBotController(QObject):
     '''
@@ -58,16 +59,6 @@ class AutoBotController(QObject):
 
         # Monitor function keys
         self.kb_listener = KeyBoardListener(is_autobot=True)
-
-    def toggle_enable(self):
-        '''
-        toggle_enable
-        '''
-        self.is_enable = not self.is_enable
-        logger.info(f"Player pressed F1, is_enable:{self.is_enable}")
-
-        # Make sure all key are released
-        self.release_all_key()
 
     def update_signal(self, ui):
         '''

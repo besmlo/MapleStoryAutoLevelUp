@@ -6,7 +6,6 @@ python mapleStoryAutoLevelUp.py --map cloud_balcony --monster brown_windup_bear,
 import time
 import random
 import argparse
-import glob
 import sys
 import logging
 import os
@@ -23,8 +22,7 @@ from src.utils.logger import logger
 from src.utils.common import (find_pattern_sqdiff, draw_rectangle, screenshot, nms,
     load_image, get_mask, get_minimap_loc_size, get_player_location_on_minimap,
     is_mac, nms_matches, override_cfg, load_yaml, get_all_other_player_locations_on_minimap,
-    click_in_game_window, mask_route_colors, to_opencv_hsv, debug_minimap_colors,
-    normalize_language_code,
+    click_in_game_window, to_opencv_hsv, debug_minimap_colors,
     activate_game_window, is_img_16_to_9,
 )
 from src.input.KeyBoardController import KeyBoardController, press_key
@@ -37,9 +35,18 @@ else:
 from src.engine.HealthMonitor import HealthMonitor
 from src.engine.Profiler import Profiler
 from src.engine.FiniteStateMachine import FiniteStateMachine
+from src.engine.BotConfigLoader import ConfigResourceError, load_bot_resources
+from src.engine.CombatAnalyzer import CombatAnalyzer
+from src.engine.RouteAnalyzer import find_nearest_actions
 from src.states.hunting import HuntingState
 from src.states.auxiliary import AuxiliaryState
 from src.states.patrol import PatrolState
+
+BOT_MODE_STATES = {
+    "normal": "hunting",
+    "aux": "aux",
+    "patrol": "patrol",
+}
 
 class MapleStoryAutoBot:
     '''
@@ -122,7 +129,7 @@ class MapleStoryAutoBot:
         self.fsm.add_state(HuntingState    ("hunting"     , self))
         self.fsm.add_state(AuxiliaryState  ("aux"         , self))
         self.fsm.add_state(PatrolState     ("patrol"      , self))
-        self.fsm.set_init_state("hunting")
+        self.fsm.set_state("hunting")
 
     def update_signals(self, image_debug_signal, route_map_viz_signal):
         '''
@@ -136,84 +143,36 @@ class MapleStoryAutoBot:
         '''
         load_config
         '''
-        # Parse color code in config
-        self.color_code = {
-            tuple(map(int, k.split(','))): v
-            for k, v in cfg["route"]["color_code"].items()
-        }
-        self.color_code_up_down = {
-            tuple(map(int, k.split(','))): v
-            for k, v in cfg["route"]["color_code_up_down"].items()
-        }
+        mode = cfg["bot"]["mode"]
+        if mode not in BOT_MODE_STATES:
+            logger.error(f"Unsupported bot mode: {mode}")
+            return -1
 
-        # Set init state
-        if cfg["bot"]["mode"] == "aux":
-            self.fsm.set_init_state("aux")
-        elif cfg["bot"]["mode"] == "patrol":
-            self.fsm.set_init_state("patrol")
-        else:
-            self.fsm.set_init_state("hunting")
+        try:
+            resources = load_bot_resources(cfg, self.data)
+        except ConfigResourceError as error:
+            logger.error(str(error))
+            return -1
 
-        if cfg["bot"]["mode"] == "normal":
-            map_name = cfg['bot']['map']
-            # Check if the map is supported in config_data.yaml
-            if map_name not in self.data["map_mobs_mapping"]:
-                text = f"Invalid map name: {map_name}. "\
-                        "Not supported in config/config_data.yaml."
-                logger.error(text)
-                return -1
-                # raise RuntimeError(text)
-
-            # Load map.png from minimaps/
-            self.img_map = load_image(f"minimaps/{map_name}/map.png",
-                                      cv2.IMREAD_COLOR)
-            # Load route*.png from minimaps/
-            route_files = sorted(glob.glob(f"minimaps/{map_name}/route*.png"))
-            route_files = [p for p in route_files if not p.endswith("route_rest.png")]
-            self.img_routes = []
-            for route_file in route_files:
-                img = cv2.cvtColor(load_image(route_file), cv2.COLOR_BGR2RGB)
-                # Remove pixel in map that is color code
-                img = mask_route_colors(self.img_map, img, cfg["route"]["color_code"])
-                img = mask_route_colors(self.img_map, img, cfg["route"]["color_code_up_down"])
-                self.img_routes.append(img)
-
-            # Load monsters images from monster/<monster_name>
-            for monster_name in self.data["map_mobs_mapping"][map_name]:
-                imgs = []
-                for file in glob.glob(f"monster/{monster_name}/{monster_name}*.png"):
-                    # Add original image
-                    img = load_image(file)
-                    imgs.append((img, get_mask(img, (0, 255, 0))))
-                    # Add flipped image
-                    img_flip = cv2.flip(img, 1)
-                    imgs.append((img_flip, get_mask(img_flip, (0, 255, 0))))
-                if imgs:
-                    self.monsters_info[monster_name] = imgs
-                else:
-                    logger.error(f"No images found in monster/{monster_name}/{monster_name}*")
-                    return -1
-                    # raise RuntimeError(f"No images found in monster/{monster_name}/{monster_name}*")
+        self.color_code = resources.color_code
+        self.color_code_up_down = resources.color_code_up_down
+        self.img_map = resources.img_map
+        self.img_routes = resources.img_routes
+        self.monsters_info = resources.monsters_info
+        self.img_nametag = resources.img_nametag
+        self.img_nametag_gray = resources.img_nametag_gray
+        self.img_create_party_enable = resources.img_create_party_enable
+        self.img_create_party_disable = resources.img_create_party_disable
+        self.img_login_button = resources.img_login_button
+        if self.monsters_info:
             logger.info(f"Loaded monsters: {list(self.monsters_info.keys())}")
-
-        # Load player's name tag
-        if cfg["nametag"]["enable"]:
-            self.img_nametag = load_image(f"nametag/{cfg['nametag']['name']}.png")
-            self.img_nametag_gray = load_image(f"nametag/{cfg['nametag']['name']}.png",
-                                               cv2.IMREAD_GRAYSCALE)
-
-        # Load misc image
-        lang = normalize_language_code(cfg["system"]["language"])
-        cfg["system"]["language"] = lang
-        self.img_create_party_enable  = load_image(f"misc/party_button_create_enable_{lang}.png")
-        self.img_create_party_disable = load_image(f"misc/party_button_create_disable_{lang}.png")
-        self.img_login_button = load_image(f"misc/login_button_{lang}.png")
 
         # Print mode on log
         logger.info(f"[load_config] Config AutoBot as {cfg['bot']['mode']} mode")
 
         # Update cfg
         self.cfg = cfg
+        self.fsm.set_state(BOT_MODE_STATES[mode])
 
         return 0 # load successfully
 
@@ -499,14 +458,12 @@ class MapleStoryAutoBot:
         self.loc_minimap_global, score, _ = find_pattern_sqdiff(
                                         self.img_map,
                                         self.img_minimap)
-
         x_offset, y_offset = self.cfg["minimap"]["offset"]
         loc_player_global = (
             self.loc_minimap_global[0] + self.loc_player_minimap[0] + x_offset,
             self.loc_minimap_global[1] + self.loc_player_minimap[1] + y_offset
         )
 
-        # Draw local minimap rectangle
         camera_bottom_right = (
             self.loc_minimap_global[0] + self.img_minimap.shape[1],
             self.loc_minimap_global[1] + self.img_minimap.shape[0]
@@ -521,7 +478,6 @@ class MapleStoryAutoBot:
             (0, 255, 255), 1
         )
 
-        # Draw player center
         cv2.circle(self.img_route_debug,
                    loc_player_global, radius=2,
                    color=(0, 255, 255), thickness=-1)
@@ -547,39 +503,14 @@ class MapleStoryAutoBot:
                 - "distance": Manhattan distance from player
             Returns None if no matching color is found within the region.
         '''
-        x0, y0 = self.loc_player_global
-        h, w = self.img_route.shape[:2]
-        x_min = max(0, x0 - self.cfg["route"]["search_range"])
-        x_max = min(w, x0 + self.cfg["route"]["search_range"])
-        y_min = max(0, y0 - self.cfg["route"]["search_range"])
-        y_max = min(h, y0 + self.cfg["route"]["search_range"])
-
-        nearest = None
-        nearest_up_down = None
-        min_dist = float('inf')
-        min_dist_up_down = float('inf')
-        for y in range(y_min, y_max):
-            for x in range(x_min, x_max):
-                pixel = tuple(self.img_route[y, x])  # (R, G, B)
-                dist = abs(x - x0) + abs(y - y0)
-                # Get nearest color
-                if pixel in self.color_code and dist < min_dist:
-                    nearest = {
-                        "pixel": (x, y),
-                        "color": pixel,
-                        "command": self.color_code[pixel],
-                        "distance": dist
-                    }
-                    min_dist = dist
-                # Get nearest color (up, dowm)
-                if pixel in self.color_code_up_down and dist < min_dist_up_down:
-                    nearest_up_down = {
-                        "pixel": (x, y),
-                        "color": pixel,
-                        "command": self.color_code_up_down[pixel],
-                        "distance": dist
-                    }
-                    min_dist_up_down = dist
+        nearest, nearest_up_down, bounds = find_nearest_actions(
+            self.img_route,
+            self.loc_player_global,
+            self.cfg["route"]["search_range"],
+            self.color_code,
+            self.color_code_up_down,
+        )
+        x_min, y_min, x_max, y_max = bounds
 
         # Debug
         draw_rectangle(
@@ -633,27 +564,12 @@ class MapleStoryAutoBot:
         '''
         get_attack_range
         '''
-        if self.cfg["bot"]["attack"] == "aoe_skill":
-            dx = self.cfg["aoe_skill"]["range_x"] // 2
-            dy = self.cfg["aoe_skill"]["range_y"] // 2
-            x0 = max(0, self.loc_player[0] - dx)
-            x1 = min(self.img_frame.shape[1], self.loc_player[0] + dx)
-            y0 = max(0, self.loc_player[1] - dy)
-            y1 = min(self.img_frame.shape[0], self.loc_player[1] + dy)
-
-        elif self.cfg["bot"]["attack"] == "directional":
-            if is_left:
-                x0 = self.loc_player[0] - self.cfg["directional_attack"]["range_x"]
-                x1 = self.loc_player[0]
-            else:
-                x0 = self.loc_player[0]
-                x1 = x0 + self.cfg["directional_attack"]["range_x"]
-            y0 = self.loc_player[1] - self.cfg["directional_attack"]["range_y"] // 2
-            y1 = y0 + self.cfg["directional_attack"]["range_y"]
-        else:
-            raise RuntimeError(f"Unsupported attack mode: {self.cfg['bot']['attack']}")
-
-        return (x0, y0, x1, y1)
+        analyzer = CombatAnalyzer(self.cfg, self.monsters_info)
+        return analyzer.attack_range(
+            self.loc_player,
+            self.img_frame.shape,
+            is_left,
+        )
 
     def get_nearest_monster(self, is_left=True):
         '''
@@ -673,40 +589,13 @@ class MapleStoryAutoBot:
             dict or None: The nearest monster's info dict, or None if no valid match.
         '''
 
-        x0, y0, x1, y1 = self.get_attack_range(is_left=is_left)
-
-        nearest_monster = None
-        min_distance = float('inf')
-        for monster in self.monsters:
-            mx1, my1 = monster["position"]
-            mw, mh = monster["size"]
-            mx2 = mx1 + mw
-            my2 = my1 + mh
-
-            # Calculate intersection
-            ix1 = max(x0, mx1)
-            iy1 = max(y0, my1)
-            ix2 = min(x1, mx2)
-            iy2 = min(y1, my2)
-
-            iw = max(0, ix2 - ix1)
-            ih = max(0, iy2 - iy1)
-            inter_area = iw * ih
-
-            min_mob_area = min(img.shape[0]*img.shape[1] for _, imgs in self.monsters_info.items() for img, _ in imgs)
-            inter_area_thres = min(min_mob_area, self.cfg['monster_detect']['max_mob_area_trigger'])
-            if inter_area >= inter_area_thres:
-                # Compute distance to player center
-                monster_center = (mx1 + mw // 2, my1 + mh // 2)
-                dx = monster_center[0] - self.loc_player[0]
-                dy = monster_center[1] - self.loc_player[1]
-                distance = abs(dx) + abs(dy)  # Manhattan distance
-
-                if distance < min_distance:
-                    min_distance = distance
-                    nearest_monster = monster
-
-        return nearest_monster
+        analyzer = CombatAnalyzer(self.cfg, self.monsters_info)
+        return analyzer.nearest_monster(
+            self.monsters,
+            self.loc_player,
+            self.img_frame.shape,
+            is_left,
+        )
 
     def get_monsters_in_range(self, top_left, bottom_right):
         '''
@@ -903,20 +792,19 @@ class MapleStoryAutoBot:
         # Make sure the window ratio is as expected
         if self.args.test_image != "":
             pass # Disable size check if using test image for debugging
-        elif self.cfg["bot"]["mode"] == "aux":
-            if not is_img_16_to_9(self.frame, self.cfg): # Aux mode allow 16:9 resolution
-                text = f"Unexpeted window size: {self.frame.shape[:2]} (expect window ratio 16:9)\n"
-                text += "Please use windowed mode & smallest resolution."
-                logger.error(text)
-                return
-        else:
-            # Other mode only allow specific resolution
-            if self.cfg["game_window"]["size"] != self.frame.shape[:2]:
-                text = f"Unexpeted window size: {self.frame.shape[:2]} "\
-                       f"(expect {self.cfg['game_window']['size']})\n"
-                text += "Please use windowed mode & smallest resolution."
-                logger.error(text)
-                return
+        elif not is_img_16_to_9(self.frame, self.cfg):
+            text = (
+                f"Unexpected window aspect ratio: {self.frame.shape[:2]}. "
+                "Please use a 16:9 windowed resolution."
+            )
+            logger.error(text)
+            return
+        elif self.cfg["game_window"]["size"] != self.frame.shape[:2]:
+            logger.info(
+                "Resize game window frame from "
+                f"{self.frame.shape[:2]} to canonical processing size "
+                "(759, 1296)"
+            )
 
         # Resize raw frame to (1296, 759)
         return cv2.resize(self.frame, (1296, 759),
@@ -1147,30 +1035,38 @@ class MapleStoryAutoBot:
         # open party window
         press_key(self.cfg["key"]["party"])
 
-        # Wait party window to show up
-        time.sleep(0.5)
+        try:
+            # Wait party window to show up
+            time.sleep(0.5)
 
-        # Update image frame
-        self.img_frame = self.get_img_frame()
+            # Update image frame
+            self.img_frame = self.get_img_frame()
+            if self.img_frame is None:
+                logger.error(
+                    "[ensure_is_in_party] Cannot inspect party state because "
+                    "the game frame is unavailable."
+                )
+                return False
 
-        # Find the 'create party' button
-        loc_enable, score_enable, _ = find_pattern_sqdiff(
-                        self.img_frame, self.img_create_party_enable)
+            # Find the 'create party' button
+            loc_enable, score_enable, _ = find_pattern_sqdiff(
+                            self.img_frame, self.img_create_party_enable)
 
-        lang = self.cfg["system"]["language"]
-        thres = self.cfg['party_red_bar'][f'create_party_button_{lang}_thres']
-        if score_enable < thres:
-            logger.info(f"[ensure_is_in_party] Find party enable button({round(score_enable, 2)})")
-            h, w = self.img_create_party_enable.shape[:2]
-            click_in_game_window(self.cfg["game_window"]["title"],
-                (loc_enable[0] + w // 2, loc_enable[1] + h // 2)
-            )
-        else:
-            logger.info("[ensure_is_in_party] Cannot find create party button."
-                        "Maybe player already in party.")
-
-        # close party window
-        press_key(self.cfg["key"]["party"])
+            lang = self.cfg["system"]["language"]
+            thres = self.cfg['party_red_bar'][f'create_party_button_{lang}_thres']
+            if score_enable < thres:
+                logger.info(f"[ensure_is_in_party] Find party enable button({round(score_enable, 2)})")
+                h, w = self.img_create_party_enable.shape[:2]
+                click_in_game_window(self.cfg["game_window"]["title"],
+                    (loc_enable[0] + w // 2, loc_enable[1] + h // 2)
+                )
+            else:
+                logger.info("[ensure_is_in_party] Cannot find create party button."
+                            "Maybe player already in party.")
+            return True
+        finally:
+            # Always close the party window, including failed frame captures.
+            press_key(self.cfg["key"]["party"])
 
     def channel_change(self):
         '''
@@ -1209,7 +1105,7 @@ class MapleStoryAutoBot:
 
         self.ensure_is_in_party() # Make sure player is in party
 
-        self.fsm.set_init_state("hunting")
+        self.fsm.set_state(BOT_MODE_STATES[self.cfg["bot"]["mode"]])
         self.t_last_attack = time.time() # Update timer
 
     def terminate_threads(self):
@@ -1657,7 +1553,7 @@ class MapleStoryAutoBot:
         ######################
         ### State Behavior ###
         ######################
-        self.fsm.do_state_stuff()
+        self.fsm.run_frame()
 
         self.is_first_frame = False
 

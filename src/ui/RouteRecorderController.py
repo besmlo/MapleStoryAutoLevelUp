@@ -1,5 +1,5 @@
-from argparse import Namespace
 import threading
+from argparse import Namespace
 
 from PySide6.QtCore import QObject, Signal
 
@@ -7,7 +7,7 @@ from src.engine.MapBundleValidator import (
     MapBundleValidator,
     register_map_bundle,
 )
-from tools.routeRecorder import RouteRecorder
+from src.engine.RouteRecorderEngine import RouteRecorderEngine
 
 
 class RouteRecorderController(QObject):
@@ -45,7 +45,7 @@ class RouteRecorderController(QObject):
             start_recording=False,
             replace_existing=False,
         )
-        self.recorder = RouteRecorder(args, cfg=cfg)
+        self.recorder = RouteRecorderEngine(args, cfg=cfg)
         self.stop_event.clear()
         self._stopped_notified = False
         self.thread = threading.Thread(

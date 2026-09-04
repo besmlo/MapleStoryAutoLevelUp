@@ -108,13 +108,6 @@ class KeyBoardListener():
         if k and k not in self.key_pressing:
             self.key_pressing.append(k)
 
-    def toggle_enable(self):
-        '''
-        toggle_enable
-        '''
-        # self.is_enable = not self.is_enable
-        logger.info(f"Player pressed F1, is_enable:{self.is_enable}")
-
     def disable(self):
         '''
         disable keyboard controlller
