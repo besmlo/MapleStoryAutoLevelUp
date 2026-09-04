@@ -3,43 +3,57 @@ Execute this script:
 python mapleStoryAutoLevelUp.py --map cloud_balcony --monster brown_windup_bear,pink_windup_bear
 '''
 # Standard import
-import time
-import random
 import argparse
-import sys
+import datetime
 import logging
 import os
-import datetime
+import random
+import sys
 import threading
+import time
+
+import cv2
 
 # Library import
 import numpy as np
-import cv2
 import yaml
 
-# Local import
-from src.utils.logger import logger
-from src.utils.common import (find_pattern_sqdiff, draw_rectangle, screenshot, nms,
-    load_image, get_mask, get_minimap_loc_size, get_player_location_on_minimap,
-    is_mac, nms_matches, override_cfg, load_yaml, get_all_other_player_locations_on_minimap,
-    click_in_game_window, to_opencv_hsv, debug_minimap_colors,
-    activate_game_window, is_img_16_to_9,
-)
 from src.input.KeyBoardController import KeyBoardController, press_key
 from src.input.KeyBoardListener import KeyBoardListener
 from src.input.StaticImageCapturor import StaticImageCapturor
+from src.utils.common import (
+    activate_game_window,
+    click_in_game_window,
+    draw_rectangle,
+    find_pattern_sqdiff,
+    get_all_other_player_locations_on_minimap,
+    get_minimap_loc_size,
+    get_player_location_on_minimap,
+    is_mac,
+    load_yaml,
+    override_cfg,
+    screenshot,
+)
+
+# Local import
+from src.utils.logger import logger
+
 if is_mac():
     from src.input.GameWindowCapturorForMac import GameWindowCapturor
 else:
     from src.input.GameWindowCapturor import GameWindowCapturor
-from src.engine.HealthMonitor import HealthMonitor
-from src.engine.Profiler import Profiler
-from src.engine.FiniteStateMachine import FiniteStateMachine
 from src.engine.BotConfigLoader import ConfigResourceError, load_bot_resources
+from src.engine.BotRuntime import BotRuntime
 from src.engine.CombatAnalyzer import CombatAnalyzer
+from src.engine.FiniteStateMachine import FiniteStateMachine
+from src.engine.FrameNormalizer import normalize_game_frame
+from src.engine.HealthMonitor import HealthMonitor
+from src.engine.MonsterDetector import MonsterDetector
+from src.engine.PlayerLocator import PlayerLocator
+from src.engine.Profiler import Profiler
 from src.engine.RouteAnalyzer import find_nearest_actions
-from src.states.hunting import HuntingState
 from src.states.auxiliary import AuxiliaryState
+from src.states.hunting import HuntingState
 from src.states.patrol import PatrolState
 
 BOT_MODE_STATES = {
@@ -123,6 +137,7 @@ class MapleStoryAutoBot:
         self.capture = None # Game window capturor
         self.health_monitor = None # Health monitor
         self.profiler = None # Profiler, for performance issue debugging
+        self.runtime = None
 
         # Finite State Machine
         self.fsm = FiniteStateMachine()
@@ -184,28 +199,22 @@ class MapleStoryAutoBot:
             if self.thread_auto_bot is not None and self.thread_auto_bot.is_alive():
                 raise RuntimeError("AutoBot is already running")
             self.is_terminated = False
-
-            # Start keyboard controller thread
-            self.kb = KeyBoardController(self.cfg)
-            if self.is_disable_control:
-                self.kb.disable() # Disable keyboard controller for debugging
-
-            # Start game window capturing thread
-            if self.args.test_image == '':
-                self.capture = GameWindowCapturor(self.cfg)
-            else:
-                self.capture = StaticImageCapturor(
-                    self.cfg, self.args.test_image
-                )
-
-            # Start health monitoring thread
-            self.health_monitor = HealthMonitor(self.cfg, self.kb)
-            if self.cfg["health_monitor"]["enable"] and \
-                not self.is_disable_control:
-                self.health_monitor.start()
-
-            # Init profiler
-            self.profiler = Profiler(self.cfg)
+            self.runtime = BotRuntime(
+                self.cfg,
+                self.args,
+                self.is_disable_control,
+                self.loop,
+                KeyBoardController,
+                GameWindowCapturor,
+                StaticImageCapturor,
+                HealthMonitor,
+                Profiler,
+            )
+            self.runtime.prepare()
+            self.kb = self.runtime.keyboard
+            self.capture = self.runtime.capture
+            self.health_monitor = self.runtime.health_monitor
+            self.profiler = self.runtime.profiler
 
             # Reset all timers
             self.t_last_frame = time.time()
@@ -216,10 +225,7 @@ class MapleStoryAutoBot:
             self.t_to_change_channel = time.time()
 
             # Start Auto Bot main thread
-            self.thread_auto_bot = threading.Thread(
-                target=self.loop, name="MapleStoryAutoBot", daemon=True
-            )
-            self.thread_auto_bot.start()
+            self.thread_auto_bot = self.runtime.start_thread()
             self.is_first_frame = True
 
         logger.info("[MapleStoryAutoBot] Started")
@@ -279,210 +285,42 @@ class MapleStoryAutoBot:
         Returns:
             loc_player (tuple): The (x, y) coordinates of the player's estimated location.
         '''
-        # Get camera region in the game window
-        img_camera = self.img_frame_gray[
-            self.cfg["camera"]["y_start"]:self.cfg["camera"]["y_end"], :]
-
-        # Get nametag image and search image
-        if self.cfg["nametag"]["mode"] == "white_mask":
-            # Apply Gaussian blur for smoother white detection
-            img_camera = cv2.GaussianBlur(img_camera, (3, 3), 0)
-            img_nametag = cv2.GaussianBlur(self.img_nametag_gray, (3, 3), 0)
-            lower_white, upper_white = (150, 255)
-            img_roi = cv2.inRange(img_camera, lower_white, upper_white)
-            img_nametag  = cv2.inRange(img_nametag, lower_white, upper_white)
-        elif self.cfg["nametag"]["mode"] == "grayscale":
-            img_roi = img_camera
-            img_nametag = self.img_nametag_gray
-        elif self.cfg["nametag"]["mode"] == "histogram_eq":
-            # Apply histogram equalization
-            img_nametag_eq = cv2.equalizeHist(self.img_nametag_gray)
-            img_camera_eq = cv2.equalizeHist(img_camera)
-
-            # Apply global (fixed) threshold
-            _, img_nametag = cv2.threshold(img_nametag_eq, 150, 255, cv2.THRESH_BINARY)
-            _, img_roi = cv2.threshold(img_camera_eq, 150, 255, cv2.THRESH_BINARY)
-        else:
-            logger.error(f"Unsupported nametag detection mode: {self.cfg['nametag']['mode']}")
-            return
-        # cv2.imshow("img_roi", img_roi)
-        # cv2.imshow("img_nametag", img_nametag)
-
-        # Pad search region to deal with fail detection when player is at map edge
-        (pad_y, pad_x) = self.img_nametag.shape[:2]
-        img_roi = cv2.copyMakeBorder(
-            img_roi,
-            pad_y, pad_y, pad_x, pad_x,
-            borderType=cv2.BORDER_REPLICATE  # replicate border for safe matching
+        result = PlayerLocator(self.cfg).by_nametag(
+            self.img_frame_gray,
+            self.img_frame_debug,
+            self.img_nametag,
+            self.img_nametag_gray,
+            self.loc_nametag,
+            self.is_first_frame,
         )
-
-        # Get last frame name tag location
-        if self.is_first_frame:
-            last_result = None
-        else:
-            last_result = (
-                self.loc_nametag[0] + pad_x,
-                self.loc_nametag[1] + pad_y - self.cfg["camera"]["y_start"]
-            )
-
-        # Get number of splits
-        h, w = img_nametag.shape
-        num_splits = max(1, w // self.cfg["nametag"]["split_width"])
-        w_split = w // num_splits
-
-        # Get nametag's background mask
-        mask = get_mask(self.img_nametag, (0, 255, 0))
-
-        # Vertically split the nametag image
-        nametag_splits = {}
-        for i in range(num_splits):
-            x_s = i * w_split
-            x_e = (i + 1) * w_split if i < num_splits - 1 else w
-            nametag_splits[f"{i+1}/{num_splits}"] = {
-                "img": img_nametag[:, x_s:x_e],
-                "mask": mask[:, x_s:x_e],
-                "last_result": (
-                    (last_result[0] + x_s, last_result[1]) if last_result else None
-                ),
-                "score_penalty": 0.0,
-                "offset_x": x_s
-            }
-
-        # Match tempalte
-        matches = []
-        for tag_type, split in nametag_splits.items():
-            loc, score, is_cached = find_pattern_sqdiff(
-                img_roi,
-                split["img"],
-                last_result=split["last_result"],
-                mask=split["mask"],
-                global_threshold=self.cfg["nametag"]["global_diff_thres"]
-            )
-            w_match = split["img"].shape[1]
-            h_match = split["img"].shape[0]
-            score += split["score_penalty"]
-            matches.append((tag_type, loc, score, w_match, h_match, is_cached, split["offset_x"]))
-
-        # Select best match and fix offset:
-        matches.sort(key=lambda x: (not x[5], x[2]))  # prefer cached, then low score
-        tag_type, loc_nametag, score, w_match, h_match, is_cached, offset_x = matches[0]
-
-        # Adjust match location back to full nametag coordinates
-        loc_nametag = (loc_nametag[0] - offset_x, loc_nametag[1])
-        loc_nametag = (
-            loc_nametag[0] - pad_x,
-            loc_nametag[1] - pad_y + self.cfg["camera"]["y_start"]
-        )
-
-        # Only update nametag location when score is good enough
-        if score < self.cfg["nametag"]["diff_thres"]:
-            self.loc_nametag = loc_nametag
-
-        loc_player = (
-            self.loc_nametag[0] + w // 2,
-            self.loc_nametag[1] - self.cfg["nametag"]["offset"][1]
-        )
-
-        # Draw name tag detection box for debugging
-        draw_rectangle(self.img_frame_debug, self.loc_nametag,
-                       self.img_nametag.shape, (0, 255, 0), "")
-        text = f"NameTag,{round(score, 2)}," + \
-                f"{'cached' if is_cached else 'missed'}," + \
-                f"{tag_type}"
-        cv2.putText(self.img_frame_debug, text,
-                    (self.loc_nametag[0],
-                     self.loc_nametag[1] + self.img_nametag.shape[0] + 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-
-        return loc_player
+        if result is None:
+            return None
+        self.loc_nametag = result.nametag
+        return result.player
 
     def get_player_location_by_party_red_bar(self):
         '''
         get_player_location_by_party_red_bar
         '''
-        # Zero out minimap area in the img_frame
-        img_frame = self.img_frame.copy()
-        x, y = self.loc_minimap
-        h, w = self.img_minimap.shape[:2]
-        img_frame[y:y+h, x:x+w] = 0
-
-        # Get camera area
-        img_camera = img_frame[
-            self.cfg["camera"]["y_start"]:self.cfg["camera"]["y_end"], :]
-
-        # Convert to HSV
-        img_hsv = cv2.cvtColor(img_camera, cv2.COLOR_BGR2HSV)
-        lower_red = to_opencv_hsv(self.cfg["party_red_bar"]["lower_red"])
-        upper_red = to_opencv_hsv(self.cfg["party_red_bar"]["upper_red"])
-        mask_red = cv2.inRange(img_hsv, lower_red, upper_red)
-        # cv2.imshow("mask_red", mask_red)
-
-        # Find contours on mask_red
-        contours, _ = cv2.findContours(mask_red, cv2.RETR_EXTERNAL,
-                                       cv2.CHAIN_APPROX_SIMPLE)
-
-        # Filter contour by specific geometry trait of red bar
-        boxs = []
-        for c in contours:
-            x, y, w, h = cv2.boundingRect(c)
-            area = cv2.contourArea(c)
-            fill_rate = float(area) / (h*w)
-            if 5 <= h <= 7 and 1 <= w <= 50 and 10 <= area and fill_rate >= 0.7:
-                # cv2.drawContours(self.img_frame_debug, [c], -1, (0, 255, 0), 1)
-                boxs.append((x, y, w, h))
-
-        if not boxs:
-            return None, None  # red bar not found
-
-        # Sort box by area
-        boxs.sort(key=lambda box: box[2] * box[3], reverse=True)
-
-        # Consider the biggest area as party red bar
-        x, y, w, h = boxs[0]
-
-        # Offset coordinate
-        loc_party_red_bar = (x, y + self.cfg["camera"]["y_start"])
-        loc_player = (loc_party_red_bar[0] + self.cfg["party_red_bar"]["offset"][0],
-                      loc_party_red_bar[1] + self.cfg["party_red_bar"]["offset"][1])
-
-        # visualize for debug
-        draw_rectangle(self.img_frame_debug, loc_party_red_bar,
-                    (h, w), (0, 255, 0), "party red bar", thickness=1, text_height=0.4)
-
-        return loc_player, loc_party_red_bar
+        return PlayerLocator(self.cfg).by_party_red_bar(
+            self.img_frame,
+            self.img_frame_debug,
+            self.loc_minimap,
+            self.img_minimap.shape,
+        )
 
     def get_player_location_on_global_map(self):
         '''
         get_player_location_on_global_map
         '''
-        self.loc_minimap_global, score, _ = find_pattern_sqdiff(
-                                        self.img_map,
-                                        self.img_minimap)
-        x_offset, y_offset = self.cfg["minimap"]["offset"]
-        loc_player_global = (
-            self.loc_minimap_global[0] + self.loc_player_minimap[0] + x_offset,
-            self.loc_minimap_global[1] + self.loc_player_minimap[1] + y_offset
-        )
-
-        camera_bottom_right = (
-            self.loc_minimap_global[0] + self.img_minimap.shape[1],
-            self.loc_minimap_global[1] + self.img_minimap.shape[0]
-        )
-        cv2.rectangle(self.img_route_debug, self.loc_minimap_global,
-                      camera_bottom_right, (0, 255, 255), 1)
-        cv2.putText(
+        result = PlayerLocator(self.cfg).on_global_map(
+            self.img_map,
+            self.img_minimap,
+            self.loc_player_minimap,
             self.img_route_debug,
-            f"Minimap,score({round(score, 2)})",
-            (self.loc_minimap_global[0], self.loc_minimap_global[1]+15),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.4,
-            (0, 255, 255), 1
         )
-
-        cv2.circle(self.img_route_debug,
-                   loc_player_global, radius=2,
-                   color=(0, 255, 255), thickness=-1)
-
-        return loc_player_global
+        self.loc_minimap_global = result.minimap_origin
+        return result.player
 
     def get_nearest_color_code(self):
         '''
@@ -510,7 +348,7 @@ class MapleStoryAutoBot:
             self.color_code,
             self.color_code_up_down,
         )
-        x_min, y_min, x_max, y_max = bounds
+        x_min, y_min, _, _ = bounds
 
         # Debug
         draw_rectangle(
@@ -601,183 +439,14 @@ class MapleStoryAutoBot:
         '''
         get_monsters_in_range
         '''
-        x0, y0 = top_left
-        x1, y1 = bottom_right
-
-        img_roi = self.img_frame[y0:y1, x0:x1]
-
-        # Shift player's location into ROI coordinate system
-        px, py = self.loc_player
-        px_in_roi = px - x0
-        py_in_roi = py - y0
-
-        # Define rectangle range around player (in ROI coordinate)
-        char_x_min = max(0, px_in_roi - self.cfg["character"]["width"] // 2)
-        char_x_max = min(img_roi.shape[1], px_in_roi + self.cfg["character"]["width"] // 2)
-        char_y_min = max(0, py_in_roi - self.cfg["character"]["height"] // 2)
-        char_y_max = min(img_roi.shape[0], py_in_roi + self.cfg["character"]["height"] // 2)
-
-        monsters = []
-        for monster_name, monster_imgs in self.monsters_info.items():
-            for img_monster, mask_monster in monster_imgs:
-                if self.cfg["bot"]["mode"] == "patrol":
-                    pass # Don't detect monster using template in patrol mode
-                elif self.cfg["monster_detect"]["mode"] == "template_free":
-                    # Generate mask where pixel is exactly (0,0,0)
-                    black_mask = np.all(img_roi == [0, 0, 0], axis=2).astype(np.uint8) * 255
-                    # cv2.imshow("Black Pixel Mask", black_mask)
-
-                    # Zero out mask inside this region (ignore player's own character)
-                    black_mask[char_y_min:char_y_max, char_x_min:char_x_max] = 0
-
-                    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (20, 20))
-                    closed_mask = cv2.morphologyEx(black_mask, cv2.MORPH_CLOSE, kernel)
-                    # cv2.imshow("Black Mask", closed_mask)
-
-                    # draw player character bounding box
-                    draw_rectangle(
-                        self.img_frame_debug, (char_x_min+x0, char_y_min+y0),
-                        (self.cfg["character"]["height"], self.cfg["character"]["width"]),
-                        (255, 0, 0), "Character Box"
-                    )
-
-                    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(closed_mask, connectivity=8)
-
-                    monsters = []
-                    min_area = 1000
-                    for i in range(1, num_labels):
-                        x, y, w, h, area = stats[i]
-                        if area > min_area:
-                            monsters.append({
-                                "name": "",
-                                "position": (x0+x, y0+y),
-                                "size": (h, w),
-                                "score": 1.0,
-                            })
-                elif self.cfg["monster_detect"]["mode"] == "contour_only":
-                    # Use only black lines contour to detect monsters
-                    # Create masks (already grayscale)
-                    mask_pattern = np.all(img_monster == [0, 0, 0], axis=2).astype(np.uint8) * 255
-                    mask_roi = np.all(img_roi == [0, 0, 0], axis=2).astype(np.uint8) * 255
-
-                    # Zero out mask inside this region (ignore player's own character)
-                    mask_roi[char_y_min:char_y_max, char_x_min:char_x_max] = 0
-
-                    # Apply Gaussian blur (soften the masks)
-                    blur = self.cfg["monster_detect"]["contour_blur"]
-                    img_monster_blur = cv2.GaussianBlur(mask_pattern, (blur, blur), 0)
-                    img_roi_blur = cv2.GaussianBlur(mask_roi, (blur, blur), 0)
-
-                    # Check template vs ROI size before matching
-                    h_roi, w_roi = img_roi_blur.shape[:2]
-                    h_temp, w_temp = img_monster_blur.shape[:2]
-
-                    if h_temp > h_roi or w_temp > w_roi:
-                        return []  # template bigger than roi, skip this matching
-
-                    # Perform template matching
-                    res = cv2.matchTemplate(img_roi_blur, img_monster_blur, cv2.TM_SQDIFF_NORMED)
-
-                    # Apply soft threshold
-                    match_locations = np.where(res <= self.cfg["monster_detect"]["diff_thres"])
-
-                    h, w = img_monster.shape[:2]
-                    for pt in zip(*match_locations[::-1]):
-                        monsters.append({
-                            "name": monster_name,
-                            "position": (pt[0] + x0, pt[1] + y0),
-                            "size": (h, w),
-                            "score": res[pt[1], pt[0]],
-                        })
-                elif self.cfg["monster_detect"]["mode"] == "grayscale":
-                    img_monster_gray = cv2.cvtColor(img_monster, cv2.COLOR_BGR2GRAY)
-                    img_roi_gray = cv2.cvtColor(img_roi, cv2.COLOR_BGR2GRAY)
-                    res = cv2.matchTemplate(
-                            img_roi_gray,
-                            img_monster_gray,
-                            cv2.TM_SQDIFF_NORMED,
-                            mask=mask_monster)
-                    match_locations = np.where(res <= self.cfg["monster_detect"]["diff_thres"])
-                    h, w = img_monster.shape[:2]
-                    for pt in zip(*match_locations[::-1]):
-                        monsters.append({
-                            "name": monster_name,
-                            "position": (pt[0] + x0, pt[1] + y0),
-                            "size": (h, w),
-                            "score": res[pt[1], pt[0]],
-                    })
-                elif self.cfg["monster_detect"]["mode"] == "color":
-                    res = cv2.matchTemplate(
-                            img_roi,
-                            img_monster,
-                            cv2.TM_SQDIFF_NORMED,
-                            mask=mask_monster)
-                    match_locations = np.where(res <= self.cfg["monster_detect"]["diff_thres"])
-                    h, w = img_monster.shape[:2]
-                    for pt in zip(*match_locations[::-1]):
-                        monsters.append({
-                            "name": monster_name,
-                            "position": (pt[0] + x0, pt[1] + y0),
-                            "size": (h, w),
-                            "score": res[pt[1], pt[0]],
-                    })
-                else:
-                    logger.error(f"Unexpected camera localization mode: {self.cfg['monster_detect']['mode']}")
-                    return []
-
-        # Apply Non-Maximum Suppression to monster detection
-        monsters = nms(monsters, iou_threshold=0.4)
-
-        # Detect monster via health bar
-        if self.cfg["monster_detect"]["with_enemy_hp_bar"]:
-            # Create color mask for Monsters' HP bar
-            mask = cv2.inRange(img_roi,
-                               np.array(self.cfg["monster_detect"]["hp_bar_color"]),
-                               np.array(self.cfg["monster_detect"]["hp_bar_color"]))
-
-            # Find connected components (each cluster of green pixels)
-            num_labels, labels, stats, centroids = \
-                cv2.connectedComponentsWithStats(mask, connectivity=8)
-
-            for i in range(1, num_labels):  # skip background (label 0)
-                x, y, w, h, area = stats[i]
-                if area < 3:  # small noise filter
-                    continue
-
-                # Guess a monster bounding box
-                y += 10
-                x = max(0, x)
-                y = max(0, y)
-                w = 70
-                h = min(img.shape[0] for _, imgs in self.monsters_info.items() for img, _ in imgs)
-
-                monsters.append({
-                    "name": "Health Bar",
-                    "position": (x0 + x, y0 + y),
-                    "size": (h, w),
-                    "score": 1.0,
-                })
-
-        # Debug
-        # Draw attack detection range
-        draw_rectangle(
-            self.img_frame_debug, (x0, y0), (y1-y0, x1-x0),
-            (255, 0, 0), "Mob Detection Box"
+        detector = MonsterDetector(self.cfg, self.monsters_info)
+        return detector.detect(
+            self.img_frame,
+            self.img_frame_debug,
+            self.loc_player,
+            top_left,
+            bottom_right,
         )
-
-        # Draw monsters bounding box
-        for monster in monsters:
-            if monster["name"] == "Health Bar":
-                color = (0, 255, 255)
-            else:
-                color = (0, 255, 0)
-
-            draw_rectangle(
-                self.img_frame_debug, monster["position"], monster["size"],
-                color, str(round(monster['score'], 2))
-            )
-
-        return monsters
 
     def get_img_frame(self):
         '''
@@ -785,30 +454,24 @@ class MapleStoryAutoBot:
         '''
         # Get window game raw frame
         self.frame = self.capture.get_frame()
-        if self.frame is None:
-            logger.warning("Failed to capture game frame.")
-            return
-
-        # Make sure the window ratio is as expected
-        if self.args.test_image != "":
-            pass # Disable size check if using test image for debugging
-        elif not is_img_16_to_9(self.frame, self.cfg):
-            text = (
-                f"Unexpected window aspect ratio: {self.frame.shape[:2]}. "
-                "Please use a 16:9 windowed resolution."
-            )
-            logger.error(text)
-            return
-        elif self.cfg["game_window"]["size"] != self.frame.shape[:2]:
+        result = normalize_game_frame(
+            self.frame,
+            self.cfg,
+            skip_aspect_check=bool(self.args.test_image),
+        )
+        if result.error:
+            if self.frame is None:
+                logger.warning(result.error)
+            else:
+                logger.error(result.error)
+            return None
+        if result.was_resized:
             logger.info(
                 "Resize game window frame from "
                 f"{self.frame.shape[:2]} to canonical processing size "
                 "(759, 1296)"
             )
-
-        # Resize raw frame to (1296, 759)
-        return cv2.resize(self.frame, (1296, 759),
-                   interpolation=cv2.INTER_NEAREST)
+        return result.image
 
     def is_player_stuck(self):
         """
@@ -1114,25 +777,9 @@ class MapleStoryAutoBot:
         '''
         with self.lifecycle_lock:
             self.is_terminated = True
-
-            # Signal workers before waiting for the main loop to finish.
-            if self.kb is not None:
-                self.kb.is_terminated = True
-                self.kb.release_all_key()
-            if self.health_monitor is not None:
-                self.health_monitor.stop()
-            if self.capture is not None:
-                self.capture.stop()
-
-            if self.thread_auto_bot is not None and \
-                    self.thread_auto_bot is not threading.current_thread():
-                self.thread_auto_bot.join(timeout=5.0)
-                if self.thread_auto_bot.is_alive():
-                    logger.warning("[MapleStoryAutoBot] Stop timed out")
-
-            if self.kb is not None:
-                self.kb.stop()
-        logger.info(f"[terminate_threads] Terminated all threads")
+            if self.runtime is not None:
+                self.runtime.stop()
+        logger.info("[terminate_threads] Terminated all threads")
 
     def get_attack_direction(self, monster_left, monster_right):
         '''
